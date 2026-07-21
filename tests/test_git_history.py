@@ -36,6 +36,12 @@ def test_history_finds_deleted_secret(tmp_path: Path):
 
     # Working tree clean — secret only in history
     assert not secret_file.exists()
-    hits = scan_git_history(repo, max_commits=20, languages=["english"])
+    hits = scan_git_history(repo, max_commits=20, languages=["english"], mode="patch")
     assert hits, "expected history hit for deleted mnemonic"
     assert any(h.findings for h in hits)
+
+    blob_hits = scan_git_history(
+        repo, max_commits=20, languages=["english"], mode="blobs", high_signal_only=True
+    )
+    assert blob_hits, "expected blob hit for wallet.txt even after delete"
+    assert any(h.mode == "blob" for h in blob_hits)

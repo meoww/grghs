@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 class CaseStatus(str, Enum):
@@ -24,9 +25,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     fingerprint     TEXT NOT NULL,
-    source_type     TEXT NOT NULL,          -- file | repo | github
-    source_path     TEXT NOT NULL,          -- path or repo URL
-    file_path       TEXT,                   -- path inside repo if any
+    source_type     TEXT NOT NULL,
+    source_path     TEXT NOT NULL,
+    file_path       TEXT,
     commit_sha      TEXT,
     word_count      INTEGER NOT NULL,
     context_preview TEXT,
@@ -36,6 +37,8 @@ CREATE TABLE IF NOT EXISTS cases (
     notify_attempts INTEGER NOT NULL DEFAULT 0,
     last_notified_at TEXT,
     notes           TEXT,
+    notify_url      TEXT,
+    notify_channel  TEXT,
     UNIQUE(fingerprint, source_path, file_path)
 );
 
@@ -64,6 +67,8 @@ class Case:
     notify_attempts: int
     last_notified_at: str | None
     notes: str | None
+    notify_url: str | None = None
+    notify_channel: str | None = None
 
 
 class CaseStore:
@@ -81,6 +86,15 @@ class CaseStore:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
+            # Lightweight migrations for existing DBs
+            cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(cases)").fetchall()
+            }
+            if "notify_url" not in cols:
+                conn.execute("ALTER TABLE cases ADD COLUMN notify_url TEXT")
+            if "notify_channel" not in cols:
+                conn.execute("ALTER TABLE cases ADD COLUMN notify_channel TEXT")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -170,7 +184,12 @@ class CaseStore:
             ).fetchone()
         return self._row_to_case(row) if row else None
 
-    def set_status(self, case_id: int, status: CaseStatus | str, notes: str | None = None) -> None:
+    def set_status(
+        self,
+        case_id: int,
+        status: CaseStatus | str,
+        notes: str | None = None,
+    ) -> None:
         st = status.value if isinstance(status, CaseStatus) else status
         now = _utcnow()
         with self.connection() as conn:
@@ -185,21 +204,62 @@ class CaseStore:
                     (st, now, case_id),
                 )
 
-    def mark_notified(self, case_id: int) -> None:
+    def mark_notified(
+        self,
+        case_id: int,
+        *,
+        url: str | None = None,
+        channel: str | None = None,
+    ) -> None:
         now = _utcnow()
         with self.connection() as conn:
             conn.execute(
                 """
                 UPDATE cases
                 SET status = ?, updated_at = ?, last_notified_at = ?,
-                    notify_attempts = notify_attempts + 1
+                    notify_attempts = notify_attempts + 1,
+                    notify_url = COALESCE(?, notify_url),
+                    notify_channel = COALESCE(?, notify_channel)
                 WHERE id = ?
                 """,
-                (CaseStatus.NOTIFIED.value, now, now, case_id),
+                (CaseStatus.NOTIFIED.value, now, now, url, channel, case_id),
             )
+
+    def stats(self) -> dict[str, int]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM cases GROUP BY status"
+            ).fetchall()
+            total = conn.execute("SELECT COUNT(*) AS n FROM cases").fetchone()["n"]
+        out = {r["status"]: int(r["n"]) for r in rows}
+        out["total"] = int(total)
+        return out
+
+    def export_cases(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 10_000,
+    ) -> list[dict[str, Any]]:
+        return [asdict(c) for c in self.list_cases(status=status, limit=limit)]
+
+    def export_json(
+        self,
+        path: Path | str,
+        *,
+        status: str | None = None,
+        limit: int = 10_000,
+    ) -> int:
+        data = self.export_cases(status=status, limit=limit)
+        Path(path).write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return len(data)
 
     @staticmethod
     def _row_to_case(row: sqlite3.Row) -> Case:
+        keys = row.keys()
         return Case(
             id=row["id"],
             fingerprint=row["fingerprint"],
@@ -215,4 +275,6 @@ class CaseStore:
             notify_attempts=row["notify_attempts"],
             last_notified_at=row["last_notified_at"],
             notes=row["notes"],
+            notify_url=row["notify_url"] if "notify_url" in keys else None,
+            notify_channel=row["notify_channel"] if "notify_channel" in keys else None,
         )

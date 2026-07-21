@@ -32,11 +32,14 @@ Recommended: classic PAT with rights to open issues on public repos; private vul
 ```bash
 seedleak scan-file ./suspicious.env
 seedleak scan-path ./some-repo
-seedleak scan-history ./some-repo --max-commits 500
-seedleak scan-repo owner/name                 # tree + history
+seedleak scan-history ./some-repo --mode both --max-commits 500
+seedleak scan-repo owner/name                 # tree + history (patch+blobs)
 seedleak scan-repo owner/name --depth 1 --no-history
 
 seedleak cases
+seedleak show 1 --draft
+seedleak stats
+seedleak export ./cases.json
 seedleak set-status 1 reviewed
 seedleak notify 1                             # dry-run drafts
 seedleak notify 1 --live --channel auto       # private report if enabled, else issue
@@ -78,6 +81,16 @@ seedleak scan-path . --all-langs
 | `issue` | Public GitHub issue only |
 
 All templates **omit** the secret. Always dry-run first.
+
+## History modes
+
+| Mode | What it scans |
+|------|----------------|
+| `patch` | Commit diffs (added lines) — fast |
+| `blobs` | Historical file contents (high-signal paths by default) |
+| `both` | Default for `scan-history` / `scan-repo` |
+
+Use `--all-paths` with blob mode to scan more files (slower, noisier).
 
 ## Detector pipeline
 

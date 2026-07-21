@@ -42,8 +42,13 @@ def test_case_upsert(tmp_path: Path):
     case = store.get(cid)
     assert case is not None
     assert case.status == "reviewed"
-    store.mark_notified(cid)
+    store.mark_notified(cid, url="https://github.com/o/r/issues/1", channel="issue")
     case = store.get(cid)
     assert case is not None
     assert case.status == "notified"
     assert case.notify_attempts == 1
+    assert case.notify_url and case.notify_channel == "issue"
+    assert store.stats()["notified"] == 1
+    out = tmp_path / "export.json"
+    n = store.export_json(out)
+    assert n == 1 and out.is_file()

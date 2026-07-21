@@ -191,6 +191,19 @@ def scan_path_cmd(
 @main.command("scan-history")
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--max-commits", default=300, show_default=True)
+@click.option(
+    "--mode",
+    type=click.Choice(["patch", "blobs", "both"], case_sensitive=False),
+    default="both",
+    show_default=True,
+    help="patch=commit diffs; blobs=historical file contents; both",
+)
+@click.option(
+    "--all-paths",
+    is_flag=True,
+    help="In blob mode, scan all text-like paths (not only high-signal names)",
+)
+@click.option("--max-blobs", default=5000, show_default=True)
 @click.option("--db", type=click.Path(path_type=Path), default=None)
 @click.option("--no-store", is_flag=True)
 @click.option(
@@ -202,20 +215,30 @@ def scan_path_cmd(
 def scan_history_cmd(
     root: Path,
     max_commits: int,
+    mode: str,
+    all_paths: bool,
+    max_blobs: int,
     db: Path | None,
     no_store: bool,
     source_label: str | None,
     lang: str | None,
     all_langs: bool,
 ) -> None:
-    """Scan git commit history patches (catches deleted-but-still-in-history secrets)."""
+    """Scan git history (patches and/or historical blobs)."""
     languages = _parse_langs(lang, all_langs)
     console.print(
-        f"History scan [bold]{root}[/bold] max_commits={max_commits} "
+        f"History scan [bold]{root}[/bold] mode={mode} max_commits={max_commits} "
         f"langs={','.join(languages)} …"
     )
     try:
-        hits = scan_git_history(root, max_commits=max_commits, languages=languages)
+        hits = scan_git_history(
+            root,
+            max_commits=max_commits,
+            languages=languages,
+            mode=mode,
+            high_signal_only=not all_paths,
+            max_blobs=max_blobs,
+        )
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
@@ -230,19 +253,21 @@ def scan_history_cmd(
             fp = fingerprint(f.normalized, secret)
             short = hit.commit[:10]
             console.print(
-                f"[red]ALERT[/red] {short}:{hit.path}  "
+                f"[red]ALERT[/red] [{hit.mode}] {short}:{hit.path}  "
                 f"{f.word_count}w/{f.language}  fp={fp[:16]}…"
             )
             if store:
                 cid, created = store.upsert_finding(
                     fingerprint=fp,
-                    source_type="github" if "/" in source and not source.startswith("/") else "repo",
+                    source_type="github"
+                    if "/" in source and not source.startswith("/")
+                    else "repo",
                     source_path=source,
                     file_path=hit.path or f"history:{short}",
                     word_count=f.word_count,
                     context_preview=f.context_preview,
-                    commit_sha=hit.commit,
-                    notes=f"lang={f.language}",
+                    commit_sha=hit.commit if hit.mode == "patch" else None,
+                    notes=f"lang={f.language};hist={hit.mode}",
                 )
                 console.print(f"  → case #{cid} ({'new' if created else 'dup'})")
 
@@ -257,6 +282,12 @@ def scan_history_cmd(
 @click.option("--depth", default=0, show_default=True, help="git clone --depth (0=full)")
 @click.option("--history/--no-history", default=True, show_default=True)
 @click.option("--max-commits", default=300, show_default=True)
+@click.option(
+    "--history-mode",
+    type=click.Choice(["patch", "blobs", "both"], case_sensitive=False),
+    default="both",
+    show_default=True,
+)
 @_lang_option
 def scan_repo_cmd(
     repo: str,
@@ -265,6 +296,7 @@ def scan_repo_cmd(
     depth: int,
     history: bool,
     max_commits: int,
+    history_mode: str,
     lang: str | None,
     all_langs: bool,
 ) -> None:
@@ -328,13 +360,18 @@ def scan_repo_cmd(
                     f"[yellow]Shallow clone (depth={depth}); history is incomplete. "
                     "Use --depth 0 for full history.[/yellow]"
                 )
-            h_hits = scan_git_history(root, max_commits=max_commits, languages=languages)
+            h_hits = scan_git_history(
+                root,
+                max_commits=max_commits,
+                languages=languages,
+                mode=history_mode,
+            )
             for hit in h_hits:
                 for f in hit.findings:
                     total += 1
                     fp = fingerprint(f.normalized, secret)
                     console.print(
-                        f"[red]ALERT[/red] hist:{hit.commit[:10]}:{hit.path}  "
+                        f"[red]ALERT[/red] hist[{hit.mode}]:{hit.commit[:10]}:{hit.path}  "
                         f"{f.word_count}w/{f.language}"
                     )
                     store.upsert_finding(
@@ -346,8 +383,8 @@ def scan_repo_cmd(
                         file_path=hit.path or f"history:{hit.commit[:10]}",
                         word_count=f.word_count,
                         context_preview=f.context_preview,
-                        commit_sha=hit.commit,
-                        notes=f"lang={f.language}",
+                        commit_sha=hit.commit if hit.mode == "patch" else None,
+                        notes=f"lang={f.language};hist={hit.mode}",
                     )
 
         console.print(f"Done. actionable findings: [bold]{total}[/bold]")
@@ -420,6 +457,87 @@ def cases_cmd(status: str | None, limit: int, db: Path | None) -> None:
         console.print("[dim]No cases yet. Run scan-file / scan-path / scan-repo.[/dim]")
 
 
+@main.command("show")
+@click.argument("case_id", type=int)
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+@click.option("--draft", is_flag=True, help="Also print notification drafts")
+def show_cmd(case_id: int, db: Path | None, draft: bool) -> None:
+    """Show one case (metadata only, never the secret)."""
+    store = _store(db)
+    case = store.get(case_id)
+    if not case:
+        console.print(f"[red]Case #{case_id} not found[/red]")
+        sys.exit(1)
+    console.print(f"[bold]Case #{case.id}[/bold]  status={case.status}")
+    console.print(f"  source_type : {case.source_type}")
+    console.print(f"  source_path : {case.source_path}")
+    console.print(f"  file_path   : {case.file_path}")
+    console.print(f"  commit      : {case.commit_sha}")
+    console.print(f"  words       : {case.word_count}")
+    console.print(f"  fingerprint : {case.fingerprint}")
+    console.print(f"  context     : {case.context_preview}")
+    console.print(f"  notes       : {case.notes}")
+    console.print(f"  found_at    : {case.found_at}")
+    console.print(f"  notified    : attempts={case.notify_attempts} at={case.last_notified_at}")
+    console.print(f"  notify_url  : {case.notify_url} ({case.notify_channel})")
+    if case.source_type == "github" and case.source_path and "/" in case.source_path:
+        base = f"https://github.com/{case.source_path}"
+        if case.file_path:
+            console.print(f"  link        : {base}/blob/HEAD/{case.file_path}")
+        else:
+            console.print(f"  link        : {base}")
+    if draft:
+        console.print("\n[bold]Issue draft[/bold]")
+        console.print(issue_title(case))
+        console.print(issue_body(case))
+
+
+@main.command("stats")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+def stats_cmd(db: Path | None) -> None:
+    """Case counts by status."""
+    store = _store(db)
+    s = store.stats()
+    table = Table(title="Case stats")
+    table.add_column("Status")
+    table.add_column("Count", justify="right")
+    for k in (
+        "new",
+        "reviewed",
+        "notified",
+        "fixed",
+        "ignored",
+        "false_positive",
+        "total",
+    ):
+        if k in s:
+            table.add_row(k, str(s[k]))
+    for k, v in sorted(s.items()):
+        if k not in {
+            "new",
+            "reviewed",
+            "notified",
+            "fixed",
+            "ignored",
+            "false_positive",
+            "total",
+        }:
+            table.add_row(k, str(v))
+    console.print(table)
+
+
+@main.command("export")
+@click.argument("path", type=click.Path(path_type=Path))
+@click.option("--status", default=None)
+@click.option("--limit", default=10_000, show_default=True)
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+def export_cmd(path: Path, status: str | None, limit: int, db: Path | None) -> None:
+    """Export case metadata to JSON (no secrets)."""
+    store = _store(db)
+    n = store.export_json(path, status=status, limit=limit)
+    console.print(f"Wrote {n} case(s) → {path}")
+
+
 @main.command("set-status")
 @click.argument("case_id", type=int)
 @click.argument(
@@ -479,7 +597,7 @@ def notify_cmd(case_id: int, live: bool, channel: str, db: Path | None) -> None:
 
     result = notify_case(case, channel=channel, dry_run=False)
     if result.ok:
-        store.mark_notified(case_id)
+        store.mark_notified(case_id, url=result.url, channel=result.channel)
         console.print(f"[green]{result.message}[/green] {result.url or ''}")
     else:
         console.print(f"[red]{result.message}[/red]")
@@ -518,7 +636,7 @@ def notify_batch_cmd(
         console.print(f"[{'green' if result.ok else 'red'}]{mark}[/{'green' if result.ok else 'red'}] "
                       f"#{case.id} {result.channel}: {result.message}")
         if live and result.ok:
-            store.mark_notified(case.id)
+            store.mark_notified(case.id, url=result.url, channel=result.channel)
             ok_n += 1
     if live:
         console.print(f"Notified: {ok_n}/{len(rows)}")
@@ -568,9 +686,12 @@ def github_search_cmd(
                 file_path=hit.path,
                 word_count=f.word_count,
                 context_preview=f.context_preview,
+                commit_sha=hit.sha,
                 notes=f"lang={f.language}",
             )
     console.print(f"Actionable remote findings: [bold]{total}[/bold]")
+    if total:
+        console.print("[dim]Next: seedleak cases --status new && seedleak show <id> --draft[/dim]")
     sys.exit(2 if total else 0)
 
 
