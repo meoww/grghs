@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
 
 from seedleak.detector.bip39 import Finding
 from seedleak.liveness.assess import Assessment, assess_mnemonic
@@ -46,21 +45,25 @@ def store_finding(
     check_balance: bool = False,
     secret: bytes | None = None,
 ) -> RecordedFinding:
-    """Fingerprint, optional balance check, store metadata, drop seed."""
+    """Fingerprint, optional multi-chain balance check, store metadata, drop seed."""
     sec = secret or load_or_create_secret()
     assessment: Assessment | None = None
     bal_json: str | None = None
     priority = None
     has_funds = False
     eth = btc44 = btc84 = None
+    addresses_json: str | None = None
 
     if check_balance:
         assessment = assess_finding(finding, check_balance=True)
         fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
         if assessment.addresses:
-            eth = assessment.addresses.eth
-            btc44 = assessment.addresses.btc_legacy
-            btc84 = assessment.addresses.btc_segwit
+            eth = assessment.addresses.eth or None
+            btc44 = assessment.addresses.btc_legacy or None
+            btc84 = assessment.addresses.btc_segwit or None
+            addresses_json = json.dumps(
+                assessment.addresses.to_dict(), ensure_ascii=False
+            )
         if assessment.balances:
             bal_json = json.dumps(assessment.balances.to_dict(), ensure_ascii=False)
             priority = assessment.priority
@@ -68,13 +71,24 @@ def store_finding(
         elif assessment.priority:
             priority = assessment.priority
     else:
-        fp = fp_fn(finding.normalized, sec)
+        # Still derive addresses without network I/O for inventory
+        assessment = assess_finding(finding, check_balance=False)
+        fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
+        if assessment.addresses:
+            eth = assessment.addresses.eth or None
+            btc44 = assessment.addresses.btc_legacy or None
+            btc84 = assessment.addresses.btc_segwit or None
+            addresses_json = json.dumps(
+                assessment.addresses.to_dict(), ensure_ascii=False
+            )
 
     note_parts = [notes] if notes else []
     if finding.language:
         note_parts.append(f"lang={finding.language}")
     if priority:
         note_parts.append(f"priority={priority}")
+    if assessment and assessment.chains_derived:
+        note_parts.append(f"chains={assessment.chains_derived}")
     merged_notes = ";".join(p for p in note_parts if p)
 
     cid, created = store.upsert_finding(
@@ -92,6 +106,7 @@ def store_finding(
         btc_legacy=btc44,
         btc_segwit=btc84,
         balance_json=bal_json,
+        addresses_json=addresses_json,
     )
     return RecordedFinding(
         case_id=cid,
@@ -106,10 +121,13 @@ def format_assessment_line(assessment: Assessment | None) -> str:
     if not assessment:
         return ""
     parts = [f"priority={assessment.priority}"]
-    if assessment.addresses:
+    if assessment.chains_derived:
+        parts.append(f"chains={assessment.chains_derived}")
+    if assessment.addresses and assessment.addresses.eth:
         parts.append(f"eth={assessment.addresses.eth[:10]}…")
     if assessment.balances:
         parts.append(assessment.balances.summary_line())
         if assessment.has_funds:
             parts.append("HAS_FUNDS")
+            parts.append("funded=" + ",".join(assessment.balances.funded_chains))
     return "  ".join(parts)

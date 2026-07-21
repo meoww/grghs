@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS cases (
     btc_legacy      TEXT,
     btc_segwit      TEXT,
     balance_json    TEXT,
+    addresses_json  TEXT,
     UNIQUE(fingerprint, source_path, file_path)
 );
 
@@ -63,6 +64,7 @@ _MIGRATE_COLS = {
     "btc_legacy": "TEXT",
     "btc_segwit": "TEXT",
     "balance_json": "TEXT",
+    "addresses_json": "TEXT",
 }
 
 
@@ -94,6 +96,7 @@ class Case:
     btc_legacy: str | None = None
     btc_segwit: str | None = None
     balance_json: str | None = None
+    addresses_json: str | None = None
 
 
 class CaseStore:
@@ -145,6 +148,7 @@ class CaseStore:
         btc_legacy: str | None = None,
         btc_segwit: str | None = None,
         balance_json: str | None = None,
+        addresses_json: str | None = None,
     ) -> tuple[int, bool]:
         """Insert or update balance metadata on duplicate. Returns (case_id, created)."""
         now = _utcnow()
@@ -155,8 +159,8 @@ class CaseStore:
                     fingerprint, source_type, source_path, file_path,
                     commit_sha, word_count, context_preview, status,
                     found_at, updated_at, notes, priority, has_funds,
-                    eth_address, btc_legacy, btc_segwit, balance_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    eth_address, btc_legacy, btc_segwit, balance_json, addresses_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint, source_path, file_path) DO NOTHING
                 """,
                 (
@@ -177,6 +181,7 @@ class CaseStore:
                     btc_legacy,
                     btc_segwit,
                     balance_json,
+                    addresses_json,
                 ),
             )
             if cur.rowcount == 1:
@@ -192,7 +197,7 @@ class CaseStore:
             ).fetchone()
             cid = int(row["id"])
             # Refresh balance metadata if we just re-checked
-            if balance_json is not None or priority is not None:
+            if balance_json is not None or priority is not None or addresses_json is not None:
                 conn.execute(
                     """
                     UPDATE cases SET
@@ -202,7 +207,8 @@ class CaseStore:
                         eth_address = COALESCE(?, eth_address),
                         btc_legacy = COALESCE(?, btc_legacy),
                         btc_segwit = COALESCE(?, btc_segwit),
-                        balance_json = COALESCE(?, balance_json)
+                        balance_json = COALESCE(?, balance_json),
+                        addresses_json = COALESCE(?, addresses_json)
                     WHERE id = ?
                     """,
                     (
@@ -213,6 +219,7 @@ class CaseStore:
                         btc_legacy,
                         btc_segwit,
                         balance_json,
+                        addresses_json,
                         cid,
                     ),
                 )
@@ -357,4 +364,5 @@ class CaseStore:
             btc_legacy=g("btc_legacy"),
             btc_segwit=g("btc_segwit"),
             balance_json=g("balance_json"),
+            addresses_json=g("addresses_json"),
         )

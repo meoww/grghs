@@ -11,6 +11,8 @@ import click
 from rich.console import Console
 from rich.table import Table
 
+import json
+
 from seedleak import __version__
 from seedleak.collectors.git_history import scan_git_history
 from seedleak.collectors.local import scan_path
@@ -462,20 +464,39 @@ def scan_text_cmd(
 @main.command("assess")
 @click.argument("mnemonic", required=False)
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read mnemonic from stdin")
-@click.option("--lang", default="english", show_default=True)
+@click.option(
+    "--lang",
+    default="auto",
+    show_default=True,
+    help="BIP39 language or 'auto' to detect",
+)
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable public metadata")
 @click.option("--no-balance", is_flag=True, help="Skip network balance queries")
+@click.option(
+    "--index",
+    "address_index",
+    default=0,
+    show_default=True,
+    help="HD address index",
+)
+@click.option(
+    "--show-all-addresses",
+    is_flag=True,
+    help="Print every derived chain address (verbose)",
+)
 def assess_cmd(
     mnemonic: str | None,
     use_stdin: bool,
     lang: str,
     as_json: bool,
     no_balance: bool,
+    address_index: int,
+    show_all_addresses: bool,
 ) -> None:
-    """Validate BIP39 + derive addresses + check public balances.
+    """Validate BIP39 + multi-chain derive + public balances.
 
-    Input is never written to the case DB. Output never echoes the mnemonic
-    when using --json (metadata only).
+    Covers BTC/EVM/TRON/SOL/COSMOS/XRP/APT/SUI and more (see `seedleak chains`).
+    Input is never written to the case DB. --json never includes the mnemonic.
     """
     from seedleak.liveness.assess import assess_mnemonic
 
@@ -487,14 +508,13 @@ def assess_cmd(
 
     a = assess_mnemonic(
         mnemonic,
-        language=lang,
+        language=None if lang == "auto" else lang,
         check_balance=not no_balance,
+        address_index=address_index,
     )
-    # Drop local reference ASAP after assess (assess already fingerprinted)
     del mnemonic
 
     if as_json:
-        # Public metadata only
         click.echo(a.to_public_json())
     else:
         console.print(f"checksum   : {'valid' if a.valid_checksum else 'INVALID'}")
@@ -502,26 +522,89 @@ def assess_cmd(
         console.print(f"words      : {a.word_count}  lang={a.language}")
         console.print(f"fingerprint: {a.fingerprint[:24]}…")
         console.print(f"priority   : {a.priority}")
+        console.print(f"chains     : {a.chains_derived} derived")
         if a.addresses:
-            console.print(f"ETH        : {a.addresses.eth}")
-            console.print(f"BTC BIP44  : {a.addresses.btc_legacy}")
-            console.print(f"BTC BIP84  : {a.addresses.btc_segwit}")
+            if show_all_addresses:
+                table = Table(title="Derived addresses (public)")
+                table.add_column("Chain")
+                table.add_column("Path")
+                table.add_column("Address")
+                for e in a.addresses.entries:
+                    table.add_row(e.chain_id, e.path, e.address)
+                console.print(table)
+            else:
+                # Highlight common wallet ecosystems
+                for cid in (
+                    "eth",
+                    "btc_segwit",
+                    "btc_legacy",
+                    "tron",
+                    "sol",
+                    "bsc",
+                    "polygon",
+                    "atom",
+                    "xrp",
+                ):
+                    addr = a.addresses.get(cid)
+                    if addr:
+                        console.print(f"{cid:12}: {addr}")
+                console.print(
+                    f"[dim]+{max(0, a.chains_derived - 9)} more "
+                    f"(use --show-all-addresses or --json)[/dim]"
+                )
+            if a.addresses.errors:
+                console.print(f"[yellow]derive errors: {len(a.addresses.errors)}[/yellow]")
         if a.balances:
             console.print(f"balances   : {a.balances.summary_line()}")
+            funded = [b for b in a.balances.items if b.ok and b.raw > 0]
+            if funded:
+                ft = Table(title="Funded")
+                ft.add_column("Chain")
+                ft.add_column("Asset")
+                ft.add_column("Amount")
+                ft.add_column("Address")
+                for b in funded:
+                    ft.add_row(b.chain_id, b.symbol, f"{b.amount:g}", b.address[:18] + "…")
+                console.print(ft)
             if a.balances.errors:
-                console.print(f"errors     : {'; '.join(a.balances.errors)}")
+                console.print(
+                    f"[dim]probe errors: {len(a.balances.errors)} "
+                    f"(RPC rate-limits are normal)[/dim]"
+                )
         if a.error:
             console.print(f"[yellow]error: {a.error}[/yellow]")
         if a.has_funds:
-            console.print("[bold red]HAS_FUNDS on derived addresses[/bold red]")
+            console.print("[bold red]HAS_FUNDS on one or more derived addresses[/bold red]")
         elif a.actionable:
-            console.print("[green]No funds on checked mainnet addresses (index 0)[/green]")
+            console.print(
+                "[green]No funds on checked mainnet addresses "
+                f"(index {address_index})[/green]"
+            )
 
     if not a.valid_checksum:
         sys.exit(1)
     if a.has_funds:
         sys.exit(3)
     sys.exit(0)
+
+
+@main.command("chains")
+def chains_cmd() -> None:
+    """List supported wallet chains for derivation / balance probes."""
+    from seedleak.liveness.chains import CHAIN_SPECS
+
+    table = Table(title="Supported chains")
+    table.add_column("ID")
+    table.add_column("Label")
+    table.add_column("Path")
+    table.add_column("Balance probe")
+    for s in CHAIN_SPECS:
+        table.add_row(s.id, s.label, s.path, s.balance.value)
+    console.print(table)
+    console.print(
+        f"[dim]{len(CHAIN_SPECS)} chains. "
+        "Balance=none means address is still derived for inventory.[/dim]"
+    )
 
 
 @main.command("cases")
@@ -593,8 +676,24 @@ def show_cmd(case_id: int, db: Path | None, draft: bool) -> None:
     console.print(f"  ETH         : {case.eth_address}")
     console.print(f"  BTC44       : {case.btc_legacy}")
     console.print(f"  BTC84       : {case.btc_segwit}")
+    if case.addresses_json:
+        try:
+            addrs = json.loads(case.addresses_json)
+            console.print(f"  addresses   : {len(addrs)} chains stored")
+            for k in ("tron", "sol", "bsc", "polygon", "atom", "xrp", "aptos", "sui"):
+                if k in addrs:
+                    console.print(f"    {k:10}: {addrs[k]}")
+        except Exception:
+            console.print(f"  addresses   : {case.addresses_json[:120]}…")
     if case.balance_json:
-        console.print(f"  balances    : {case.balance_json[:200]}…")
+        try:
+            bal = json.loads(case.balance_json)
+            console.print(
+                f"  balances    : funded={bal.get('funded_chains')} "
+                f"priority={bal.get('priority')}"
+            )
+        except Exception:
+            console.print(f"  balances    : {case.balance_json[:200]}…")
     console.print(f"  context     : {case.context_preview}")
     console.print(f"  notes       : {case.notes}")
     console.print(f"  found_at    : {case.found_at}")
