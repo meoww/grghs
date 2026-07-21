@@ -16,6 +16,7 @@ from seedleak.collectors.git_history import scan_git_history
 from seedleak.collectors.local import scan_path
 from seedleak.detector.bip39 import LANGUAGES, default_languages, scan_file, scan_text
 from seedleak.detector.denylist import load_denylist
+from seedleak.env import load_dotenv
 from seedleak.notify.github_issue import NotifyChannel, notify_case
 from seedleak.notify.templates import (
     dry_run_report,
@@ -28,6 +29,9 @@ from seedleak.storage.db import CaseStatus, CaseStore
 from seedleak.storage.fingerprint import fingerprint, load_or_create_secret
 
 console = Console(stderr=True)
+
+# Load .env before any command that needs GITHUB_TOKEN
+load_dotenv()
 
 
 def _default_db() -> Path:

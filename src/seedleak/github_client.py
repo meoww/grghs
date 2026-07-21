@@ -22,11 +22,16 @@ class GitHubError(RuntimeError):
 
 
 def get_token(explicit: str | None = None) -> str:
+    if not explicit:
+        # Pick up project/.env if shell env is empty
+        from seedleak.env import load_dotenv
+
+        load_dotenv()
     token = explicit or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not token:
         raise GitHubError(
             "Missing GitHub token. Set GITHUB_TOKEN or GH_TOKEN in the environment "
-            "(do not put tokens in the repo or chat)."
+            "or in a local .env file (do not put tokens in the repo or chat)."
         )
     return token.strip()
 
