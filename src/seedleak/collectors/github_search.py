@@ -4,23 +4,13 @@ from __future__ import annotations
 
 import base64
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from seedleak.collectors.queries import SearchQuery, default_hunt_queries
 from seedleak.detector.bip39 import Finding, scan_text
 from seedleak.detector.denylist import load_denylist
 from seedleak.github_client import GitHubClient, GitHubError
-
-# High-signal queries. Keep short — search API is expensive / rate-limited.
-DEFAULT_QUERIES = [
-    '"seed phrase" mnemonic -test -example -demo',
-    '"recovery phrase" wallet -test -hardhat',
-    "bip39 mnemonic wallet -test",
-    '"mnemonic" filename:.env',
-    "MNEMONIC= filename:.env",
-    '"12 words" "private" wallet seed',
-    "wallet_seed OR recovery_seed filename:.txt",
-]
 
 
 @dataclass
@@ -30,10 +20,21 @@ class RemoteHit:
     path: str
     findings: list[Finding]
     sha: str | None = None
+    search_query: str = ""
+    query_category: str = ""
+    query_note: str = ""
+
+
+@dataclass
+class SearchRunStats:
+    queries_run: int = 0
+    items_seen: int = 0
+    files_scanned: int = 0
+    hits: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 def _api_path_from_url(url: str) -> str | None:
-    """Convert full API URL to path for GitHubClient base_url."""
     if not url:
         return None
     if url.startswith("https://api.github.com"):
@@ -54,7 +55,6 @@ def _fetch_file_text(gh: GitHubClient, item: dict) -> str:
     ]
     text = "\n".join(fragments)
 
-    # Always try full file content when possible (fragments alone miss boundaries)
     repo = item.get("repository", {}).get("full_name", "")
     path = item.get("path", "")
     if repo and path:
@@ -63,9 +63,6 @@ def _fetch_file_text(gh: GitHubClient, item: dict) -> str:
             c = gh.get(f"/repos/{owner}/{name}/contents/{path}")
             if isinstance(c, dict) and c.get("content"):
                 return base64.b64decode(c["content"]).decode("utf-8", errors="replace")
-            if isinstance(c, list):
-                # directory — ignore
-                pass
         except GitHubError:
             pass
 
@@ -87,31 +84,58 @@ def _fetch_file_text(gh: GitHubClient, item: dict) -> str:
         return text
 
 
+def _normalize_queries(
+    queries: list[str] | list[SearchQuery] | None,
+) -> list[SearchQuery]:
+    if not queries:
+        return default_hunt_queries()
+    out: list[SearchQuery] = []
+    for q in queries:
+        if isinstance(q, SearchQuery):
+            out.append(q)
+        else:
+            out.append(SearchQuery(str(q), "custom", "user-provided"))
+    return out
+
+
 def search_and_scan(
-    queries: list[str] | None = None,
+    queries: list[str] | list[SearchQuery] | None = None,
     *,
     token: str | None = None,
     max_per_query: int = 10,
     denylist_paths: list[str] | None = None,
     languages: list[str] | None = None,
-) -> list[RemoteHit]:
+    continue_on_error: bool = True,
+) -> tuple[list[RemoteHit], SearchRunStats]:
+    """Search GitHub code and scan hits for valid BIP39 mnemonics.
+
+    Each hit records the ``search_query`` that produced it.
+    """
     denylist = load_denylist(denylist_paths)
     hits: list[RemoteHit] = []
+    # Dedupe by repo+path but keep first query that found it
     seen: set[tuple[str, str]] = set()
-    queries = queries or DEFAULT_QUERIES
+    qlist = _normalize_queries(queries)
+    stats = SearchRunStats()
 
     with GitHubClient(token) as gh:
-        for q in queries:
+        for sq in qlist:
+            stats.queries_run += 1
             try:
                 data = gh.get(
                     "/search/code",
-                    params={"q": q, "per_page": max_per_query},
+                    params={"q": sq.query, "per_page": max_per_query},
                     headers={"Accept": "application/vnd.github.text-match+json"},
                 )
             except GitHubError as e:
-                raise RuntimeError(str(e)) from e
+                msg = f"query={sq.query!r}: {e}"
+                stats.errors.append(msg)
+                if not continue_on_error:
+                    raise RuntimeError(msg) from e
+                continue
 
             items = (data or {}).get("items", [])
+            stats.items_seen += len(items)
             for item in items:
                 repo = item.get("repository", {}).get("full_name", "")
                 path = item.get("path", "")
@@ -125,6 +149,7 @@ def search_and_scan(
                 text = _fetch_file_text(gh, item)
                 if not text.strip():
                     continue
+                stats.files_scanned += 1
 
                 findings = [
                     f
@@ -132,6 +157,7 @@ def search_and_scan(
                     if f.is_alert
                 ]
                 if findings:
+                    stats.hits += 1
                     hits.append(
                         RemoteHit(
                             repo_full_name=repo,
@@ -139,9 +165,12 @@ def search_and_scan(
                             path=path,
                             findings=findings,
                             sha=sha,
+                            search_query=sq.query,
+                            query_category=sq.category,
+                            query_note=sq.note,
                         )
                     )
-    return hits
+    return hits, stats
 
 
 def parse_github_repo_arg(value: str) -> str:

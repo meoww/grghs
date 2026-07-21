@@ -64,11 +64,17 @@ seedleak assess --indexes 0-2 --show-all-addresses "..."
 seedleak assess --json --stdin < phrase.txt
 seedleak assess --lang auto --stdin < phrase.txt
 
-# Hunt: all BIP39 languages + indexes 0-5 + multi-chain balances (defaults)
-seedleak github-search --max-per-query 5
-seedleak github-search --english-only --indexes 0
+# Hunt: default query catalog (code constructs + BIP39 n-grams) + balances
+seedleak list-queries
+seedleak github-search --max-per-query 10
+seedleak github-search --no-ngrams --english-only --indexes 0
+seedleak github-search --query 'fromMnemonic(' --query 'MNEMONIC= filename:.env'
 seedleak scan-file ./leak.env --check-balance
 ```
+
+Each finding stores **`search_query` / `query_category` / `query_note`** so you can see
+*how* it was discovered (`seedleak show <id>`).
+
 
 **Derivation (indexes 0–5 by default)** includes major wallet ecosystems, among others:
 

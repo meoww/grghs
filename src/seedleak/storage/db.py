@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS cases (
     source_url      TEXT,
     language        TEXT,
     funded_summary  TEXT,
+    search_query    TEXT,
+    query_category  TEXT,
+    query_note      TEXT,
     UNIQUE(fingerprint, source_path, file_path)
 );
 
@@ -77,6 +80,9 @@ _MIGRATE_COLS = {
     "source_url": "TEXT",
     "language": "TEXT",
     "funded_summary": "TEXT",
+    "search_query": "TEXT",
+    "query_category": "TEXT",
+    "query_note": "TEXT",
 }
 
 
@@ -114,6 +120,9 @@ class Case:
     source_url: str | None = None
     language: str | None = None
     funded_summary: str | None = None
+    search_query: str | None = None
+    query_category: str | None = None
+    query_note: str | None = None
 
 
 class CaseStore:
@@ -187,6 +196,9 @@ class CaseStore:
         source_url: str | None = None,
         language: str | None = None,
         funded_summary: str | None = None,
+        search_query: str | None = None,
+        query_category: str | None = None,
+        query_note: str | None = None,
     ) -> tuple[int, bool]:
         """Insert or update finding metadata. Returns (case_id, created)."""
         now = _utcnow()
@@ -198,8 +210,9 @@ class CaseStore:
                     commit_sha, word_count, context_preview, status,
                     found_at, updated_at, notes, priority, has_funds,
                     eth_address, btc_legacy, btc_segwit, balance_json, addresses_json,
-                    mnemonic_enc, secret_stored, source_url, language, funded_summary
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mnemonic_enc, secret_stored, source_url, language, funded_summary,
+                    search_query, query_category, query_note
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint, source_path, file_path) DO NOTHING
                 """,
                 (
@@ -226,6 +239,9 @@ class CaseStore:
                     source_url,
                     language,
                     funded_summary,
+                    search_query,
+                    query_category,
+                    query_note,
                 ),
             )
             if cur.rowcount == 1:
@@ -263,7 +279,10 @@ class CaseStore:
                             WHEN ? = 1 THEN 1 ELSE secret_stored END,
                         source_url = COALESCE(?, source_url),
                         language = COALESCE(?, language),
-                        funded_summary = COALESCE(?, funded_summary)
+                        funded_summary = COALESCE(?, funded_summary),
+                        search_query = COALESCE(?, search_query),
+                        query_category = COALESCE(?, query_category),
+                        query_note = COALESCE(?, query_note)
                     WHERE id = ?
                     """,
                     (
@@ -280,6 +299,9 @@ class CaseStore:
                         source_url,
                         language,
                         funded_summary,
+                        search_query,
+                        query_category,
+                        query_note,
                         cid,
                     ),
                 )
@@ -442,4 +464,7 @@ class CaseStore:
             source_url=g("source_url"),
             language=g("language"),
             funded_summary=g("funded_summary"),
+            search_query=g("search_query"),
+            query_category=g("query_category"),
+            query_note=g("query_note"),
         )

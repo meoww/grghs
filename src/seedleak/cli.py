@@ -710,6 +710,8 @@ def show_cmd(case_id: int, db: Path | None, draft: bool) -> None:
     console.print(f"  priority    : {case.priority}  has_funds={case.has_funds}")
     console.print(f"  language    : {case.language}")
     console.print(f"  source_url  : {case.source_url}")
+    console.print(f"  search_query: {case.search_query}")
+    console.print(f"  query_cat  : {case.query_category}  ({case.query_note})")
     console.print(f"  vault       : secret_stored={case.secret_stored}")
     console.print(f"  funded_sum  : {case.funded_summary}")
     console.print(f"  ETH         : {case.eth_address}")
@@ -900,9 +902,27 @@ def notify_batch_cmd(
         console.print(f"Notified: {ok_n}/{len(rows)}")
 
 
+@main.command("list-queries")
+@click.option("--ngrams/--no-ngrams", default=True, show_default=True)
+@click.option("--ngram-count", default=40, show_default=True)
+def list_queries_cmd(ngrams: bool, ngram_count: int) -> None:
+    """Show the default hunt query catalog (code constructs + BIP39 n-grams)."""
+    from seedleak.collectors.queries import default_hunt_queries
+
+    qs = default_hunt_queries(include_ngrams=ngrams, ngram_count=ngram_count)
+    table = Table(title=f"Hunt queries ({len(qs)})")
+    table.add_column("#", justify="right")
+    table.add_column("Cat")
+    table.add_column("Query")
+    table.add_column("Note")
+    for i, q in enumerate(qs, 1):
+        table.add_row(str(i), q.category, q.query[:70], (q.note or "")[:28])
+    console.print(table)
+
+
 @main.command("github-search")
 @click.option("--query", "queries", multiple=True, help="Override default search queries")
-@click.option("--max-per-query", default=5, show_default=True)
+@click.option("--max-per-query", default=10, show_default=True)
 @click.option(
     "--check-balance/--no-check-balance",
     default=True,
@@ -922,6 +942,12 @@ def notify_batch_cmd(
     help="Detect BIP39 in all bundled languages (default on for hunt)",
 )
 @click.option("--lang", default=None, help="Override languages (disables default all-langs if set)")
+@click.option(
+    "--no-ngrams",
+    is_flag=True,
+    help="Disable BIP39 word n-gram queries in the default catalog",
+)
+@click.option("--ngram-count", default=40, show_default=True, help="How many 3-gram queries")
 @click.option("--db", type=click.Path(path_type=Path), default=None)
 def github_search_cmd(
     queries: tuple[str, ...],
@@ -930,38 +956,56 @@ def github_search_cmd(
     indexes: str,
     all_langs: bool,
     lang: str | None,
+    no_ngrams: bool,
+    ngram_count: int,
     db: Path | None,
 ) -> None:
     """Search public GitHub code (requires GITHUB_TOKEN). Rate-limit aware.
 
-    Defaults: all BIP39 languages, HD indexes 0–5, multi-chain balances.
+    Default query catalog: SDK/code constructs + .env patterns + BIP39 n-grams.
+    Each finding stores the search_query that discovered it.
     """
     from seedleak.collectors.github_search import search_and_scan
+    from seedleak.collectors.queries import default_hunt_queries
     from seedleak.liveness.derive import parse_indexes
 
-    # If user passes --lang, use that; else honor --all-langs (default True)
     if lang:
         languages = _parse_langs(lang, False)
     else:
         languages = _parse_langs(None, all_langs)
     idx = parse_indexes(indexes)
+
+    if queries:
+        qlist = list(queries)
+    else:
+        qlist = default_hunt_queries(
+            include_ngrams=not no_ngrams,
+            ngram_count=ngram_count,
+        )
     console.print(
-        f"Hunt langs={','.join(languages)} indexes={idx[0]}-{idx[-1]} "
-        f"balance={check_balance}"
+        f"Hunt queries={len(qlist)} langs={len(languages)} "
+        f"indexes={idx[0]}-{idx[-1]} balance={check_balance}"
     )
     try:
-        hits = search_and_scan(
-            list(queries) if queries else None,
+        hits, stats = search_and_scan(
+            qlist,
             max_per_query=max_per_query,
             languages=languages,
+            continue_on_error=True,
         )
     except Exception as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
 
+    if stats.errors:
+        console.print(f"[yellow]Search errors: {len(stats.errors)}[/yellow]")
+        for err in stats.errors[:5]:
+            console.print(f"  [dim]{err[:120]}[/dim]")
+
     store = _store(db)
     total = 0
     funded = 0
+    vaulted = 0
     for hit in hits:
         for f in hit.findings:
             total += 1
@@ -975,13 +1019,21 @@ def github_search_cmd(
                 check_balance=check_balance,
                 indexes=idx,
                 source_url=hit.html_url or None,
+                search_query=hit.search_query or None,
+                query_category=hit.query_category or None,
+                query_note=hit.query_note or None,
             )
             color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
             vault_tag = " [vault]" if rec.secret_stored else ""
             console.print(
                 f"[{color}]ALERT[/{color}]{vault_tag} {hit.repo_full_name}:{hit.path}  "
-                f"{f.word_count}w/{f.language}  case=#{rec.case_id}  {hit.html_url}"
+                f"{f.word_count}w/{f.language}  case=#{rec.case_id}"
             )
+            if hit.search_query:
+                console.print(
+                    f"  [cyan]query[/cyan] [{hit.query_category}] {hit.search_query[:100]}"
+                )
+            console.print(f"  {hit.html_url}")
             if rec.assessment:
                 console.print(f"  {format_assessment_line(rec.assessment)}")
                 if rec.assessment.addresses:
@@ -996,13 +1048,19 @@ def github_search_cmd(
                 if rec.assessment.has_funds:
                     funded += 1
             if rec.secret_stored:
+                vaulted += 1
                 console.print(
                     "  [yellow]encrypted mnemonic stored in vault "
                     "(non-test + balance>0)[/yellow]"
                 )
     console.print(
-        f"Actionable remote findings: [bold]{total}[/bold]  "
-        f"funded: [bold red]{funded}[/bold red]"
+        f"Queries run: {stats.queries_run}  items: {stats.items_seen}  "
+        f"files scanned: {stats.files_scanned}"
+    )
+    console.print(
+        f"Actionable findings: [bold]{total}[/bold]  "
+        f"funded: [bold red]{funded}[/bold red]  "
+        f"vaulted: [bold yellow]{vaulted}[/bold yellow]"
     )
     if total:
         console.print(
@@ -1076,6 +1134,8 @@ def vault_show_cmd(case_id: int, reveal: bool, db: Path | None) -> None:
     console.print(f"  language    : {case.language}  words={case.word_count}")
     console.print(f"  fingerprint : {case.fingerprint}")
     console.print(f"  found_at    : {case.found_at}")
+    console.print(f"  search_query: {case.search_query}")
+    console.print(f"  query_cat  : {case.query_category}  ({case.query_note})")
     console.print(f"  funded      : {case.funded_summary}")
     console.print(f"  ETH         : {case.eth_address}")
     console.print(f"  BTC84       : {case.btc_segwit}")
@@ -1139,6 +1199,9 @@ def vault_export_cmd(
             "priority": c.priority,
             "has_funds": c.has_funds,
             "funded_summary": c.funded_summary,
+            "search_query": c.search_query,
+            "query_category": c.query_category,
+            "query_note": c.query_note,
             "eth_address": c.eth_address,
             "btc_legacy": c.btc_legacy,
             "btc_segwit": c.btc_segwit,

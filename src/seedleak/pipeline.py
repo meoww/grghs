@@ -82,6 +82,9 @@ def store_finding(
     indexes: list[int] | str | None = None,
     source_url: str | None = None,
     store_secrets: bool = True,
+    search_query: str | None = None,
+    query_category: str | None = None,
+    query_note: str | None = None,
 ) -> RecordedFinding:
     """Fingerprint, optional multi-chain balance check, store metadata.
 
@@ -149,6 +152,8 @@ def store_finding(
         note_parts.append(f"idx={','.join(map(str, assessment.indexes))}")
     if secret_ok:
         note_parts.append("vault=1")
+    if query_category:
+        note_parts.append(f"qcat={query_category}")
     merged_notes = ";".join(p for p in note_parts if p)
 
     url = _build_source_url(
@@ -180,6 +185,9 @@ def store_finding(
         source_url=url,
         language=finding.language or assessment.language,
         funded_summary=funded_summary,
+        search_query=search_query,
+        query_category=query_category,
+        query_note=query_note,
     )
     return RecordedFinding(
         case_id=cid,
