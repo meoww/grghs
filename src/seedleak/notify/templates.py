@@ -27,6 +27,31 @@ def _location_block(case: Case) -> str:
 """
 
 
+def _funds_block(case: Case) -> str:
+    if not getattr(case, "has_funds", False) and not getattr(case, "priority", None):
+        return ""
+    lines = ["## On-chain priority (public balances only)", ""]
+    if case.has_funds:
+        lines.append(
+            "**Non-zero balance observed** on at least one derived mainnet address "
+            "(ETH / ERC-20 USDT / BTC). Treat as **urgent** — rotate immediately."
+        )
+    elif case.priority:
+        lines.append(f"Priority heuristic: `{case.priority}` (may be zero-balance or partial check).")
+    if case.eth_address:
+        lines.append(f"- ETH address checked: `{case.eth_address}`")
+    if case.btc_segwit:
+        lines.append(f"- BTC (BIP84) checked: `{case.btc_segwit}`")
+    if case.btc_legacy:
+        lines.append(f"- BTC (BIP44) checked: `{case.btc_legacy}`")
+    lines.append("")
+    lines.append(
+        "Balances were read via public APIs only. No private keys were used or stored."
+    )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def issue_body(case: Case, *, tool_name: str = "seedleak") -> str:
     return f"""## Summary
 
@@ -37,6 +62,7 @@ This pattern may allow full control of associated cryptocurrency wallets (Bitcoi
 ## Location (no secret included)
 
 {_location_block(case)}
+{_funds_block(case)}
 **We do not store or publish the secret itself.** Detected by `{tool_name}`.
 
 ## Recommended actions
@@ -68,6 +94,7 @@ Anyone who obtains it can derive private keys for Bitcoin, Ethereum, USDT (ERC-2
 ## Location (secret intentionally omitted)
 
 {_location_block(case)}
+{_funds_block(case)}
 
 The reporting tool (`{tool_name}`) stores only an HMAC fingerprint of the finding, not the plaintext secret.
 

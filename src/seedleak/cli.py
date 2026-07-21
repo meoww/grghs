@@ -25,6 +25,7 @@ from seedleak.notify.templates import (
     private_report_body,
     private_report_summary,
 )
+from seedleak.pipeline import format_assessment_line, store_finding
 from seedleak.storage.db import CaseStatus, CaseStore
 from seedleak.storage.fingerprint import fingerprint, load_or_create_secret
 
@@ -93,12 +94,19 @@ def main() -> None:
 @click.option("--show-denied", is_flag=True, help="Also show denylisted test vectors")
 @click.option("--db", type=click.Path(path_type=Path), default=None, help="Case DB path")
 @click.option("--no-store", is_flag=True, help="Do not write findings to the case DB")
+@click.option(
+    "--check-balance/--no-check-balance",
+    default=False,
+    show_default=True,
+    help="Derive addresses + public balance check",
+)
 @_lang_option
 def scan_file_cmd(
     path: Path,
     show_denied: bool,
     db: Path | None,
     no_store: bool,
+    check_balance: bool,
     lang: str | None,
     all_langs: bool,
 ) -> None:
@@ -120,24 +128,31 @@ def scan_file_cmd(
         if not f.checksum_valid:
             continue
         alerts += 1
-        fp = fingerprint(f.normalized, secret)
-        status = "DENYLIST" if f.is_denylisted else "ALERT"
-        color = "yellow" if f.is_denylisted else "red"
-        console.print(
-            f"[{color}]{status}[/{color}] {f.word_count}w lang={f.language}  "
-            f"fp={fp[:16]}…  {f.context_preview}"
-        )
         if store and f.is_alert:
-            cid, created = store.upsert_finding(
-                fingerprint=fp,
+            rec = store_finding(
+                store,
+                f,
                 source_type="file",
                 source_path=str(path.resolve()),
                 file_path=path.name,
-                word_count=f.word_count,
-                context_preview=f.context_preview,
-                notes=f"lang={f.language}",
+                check_balance=check_balance,
+                secret=secret,
             )
-            console.print(f"  → case #{cid} ({'new' if created else 'dup'})")
+            color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
+            console.print(
+                f"[{color}]ALERT[/{color}] {f.word_count}w lang={f.language}  "
+                f"fp={rec.fingerprint[:16]}…  case=#{rec.case_id}"
+            )
+            if rec.assessment:
+                console.print(f"  {format_assessment_line(rec.assessment)}")
+        else:
+            fp = fingerprint(f.normalized, secret)
+            status = "DENYLIST" if f.is_denylisted else "ALERT"
+            color = "yellow" if f.is_denylisted else "red"
+            console.print(
+                f"[{color}]{status}[/{color}] {f.word_count}w lang={f.language}  "
+                f"fp={fp[:16]}…  {f.context_preview}"
+            )
 
     if alerts == 0:
         console.print("[green]No actionable alerts[/green]")
@@ -397,10 +412,17 @@ def scan_repo_cmd(
 @main.command("scan-text")
 @click.argument("text", required=False)
 @click.option("--stdin", "use_stdin", is_flag=True, help="Read text from stdin")
+@click.option(
+    "--check-balance/--no-check-balance",
+    default=False,
+    show_default=True,
+    help="Derive addresses and query public balances (read-only)",
+)
 @_lang_option
 def scan_text_cmd(
     text: str | None,
     use_stdin: bool,
+    check_balance: bool,
     lang: str | None,
     all_langs: bool,
 ) -> None:
@@ -411,15 +433,95 @@ def scan_text_cmd(
     denylist = load_denylist()
     findings = scan_text(text, denylist=denylist, languages=languages)
     secret = _secret()
+    funded = 0
     for f in findings:
         fp = fingerprint(f.normalized, secret)
         label = "DENYLIST" if f.is_denylisted else ("ALERT" if f.is_alert else "invalid")
         console.print(
             f"{label} {f.word_count}w/{f.language} fp={fp[:16]}… {f.context_preview}"
         )
+        if check_balance and f.is_alert:
+            from seedleak.liveness.assess import assess_mnemonic
+
+            a = assess_mnemonic(f.normalized, language=f.language, check_balance=True)
+            console.print(f"  {format_assessment_line(a)}")
+            if a.addresses:
+                console.print(f"  ETH  {a.addresses.eth}")
+                console.print(f"  BTC44 {a.addresses.btc_legacy}")
+                console.print(f"  BTC84 {a.addresses.btc_segwit}")
+            if a.has_funds:
+                funded += 1
+                console.print("  [bold red]HAS_FUNDS — prioritize disclosure[/bold red]")
     if not findings:
         console.print("[green]No candidates[/green]")
+    if check_balance and funded:
+        console.print(f"[red]Funded findings: {funded}[/red]")
     sys.exit(2 if any(f.is_alert for f in findings) else 0)
+
+
+@main.command("assess")
+@click.argument("mnemonic", required=False)
+@click.option("--stdin", "use_stdin", is_flag=True, help="Read mnemonic from stdin")
+@click.option("--lang", default="english", show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable public metadata")
+@click.option("--no-balance", is_flag=True, help="Skip network balance queries")
+def assess_cmd(
+    mnemonic: str | None,
+    use_stdin: bool,
+    lang: str,
+    as_json: bool,
+    no_balance: bool,
+) -> None:
+    """Validate BIP39 + derive addresses + check public balances.
+
+    Input is never written to the case DB. Output never echoes the mnemonic
+    when using --json (metadata only).
+    """
+    from seedleak.liveness.assess import assess_mnemonic
+
+    if use_stdin or mnemonic is None:
+        mnemonic = sys.stdin.read().strip()
+    if not mnemonic:
+        console.print("[red]Empty mnemonic[/red]")
+        sys.exit(1)
+
+    a = assess_mnemonic(
+        mnemonic,
+        language=lang,
+        check_balance=not no_balance,
+    )
+    # Drop local reference ASAP after assess (assess already fingerprinted)
+    del mnemonic
+
+    if as_json:
+        # Public metadata only
+        click.echo(a.to_public_json())
+    else:
+        console.print(f"checksum   : {'valid' if a.valid_checksum else 'INVALID'}")
+        console.print(f"denylisted : {a.denylisted}")
+        console.print(f"words      : {a.word_count}  lang={a.language}")
+        console.print(f"fingerprint: {a.fingerprint[:24]}…")
+        console.print(f"priority   : {a.priority}")
+        if a.addresses:
+            console.print(f"ETH        : {a.addresses.eth}")
+            console.print(f"BTC BIP44  : {a.addresses.btc_legacy}")
+            console.print(f"BTC BIP84  : {a.addresses.btc_segwit}")
+        if a.balances:
+            console.print(f"balances   : {a.balances.summary_line()}")
+            if a.balances.errors:
+                console.print(f"errors     : {'; '.join(a.balances.errors)}")
+        if a.error:
+            console.print(f"[yellow]error: {a.error}[/yellow]")
+        if a.has_funds:
+            console.print("[bold red]HAS_FUNDS on derived addresses[/bold red]")
+        elif a.actionable:
+            console.print("[green]No funds on checked mainnet addresses (index 0)[/green]")
+
+    if not a.valid_checksum:
+        sys.exit(1)
+    if a.has_funds:
+        sys.exit(3)
+    sys.exit(0)
 
 
 @main.command("cases")
@@ -428,29 +530,41 @@ def scan_text_cmd(
     default=None,
     help="Filter: new|reviewed|notified|fixed|ignored|false_positive",
 )
+@click.option("--funds-only", is_flag=True, help="Only cases with has_funds=1")
 @click.option("--limit", default=50, show_default=True)
 @click.option("--db", type=click.Path(path_type=Path), default=None)
-def cases_cmd(status: str | None, limit: int, db: Path | None) -> None:
+def cases_cmd(
+    status: str | None,
+    funds_only: bool,
+    limit: int,
+    db: Path | None,
+) -> None:
     """List stored cases (metadata only)."""
     store = _store(db)
-    rows = store.list_cases(status=status, limit=limit)
+    rows = store.list_cases(
+        status=status,
+        has_funds=True if funds_only else None,
+        limit=limit,
+    )
     table = Table(title="Cases")
     table.add_column("ID", justify="right")
     table.add_column("Status")
+    table.add_column("Pri")
+    table.add_column("$", justify="center")
     table.add_column("Words", justify="right")
     table.add_column("Source")
     table.add_column("File")
-    table.add_column("Commit")
     table.add_column("FP")
     for c in rows:
         table.add_row(
             str(c.id),
             c.status,
+            c.priority or "-",
+            "Y" if c.has_funds else "",
             str(c.word_count),
-            (c.source_path or "")[:36],
-            (c.file_path or "")[:28],
-            (c.commit_sha or "")[:8],
-            c.fingerprint[:12] + "…",
+            (c.source_path or "")[:32],
+            (c.file_path or "")[:24],
+            c.fingerprint[:10] + "…",
         )
     console.print(table)
     if not rows:
@@ -475,6 +589,12 @@ def show_cmd(case_id: int, db: Path | None, draft: bool) -> None:
     console.print(f"  commit      : {case.commit_sha}")
     console.print(f"  words       : {case.word_count}")
     console.print(f"  fingerprint : {case.fingerprint}")
+    console.print(f"  priority    : {case.priority}  has_funds={case.has_funds}")
+    console.print(f"  ETH         : {case.eth_address}")
+    console.print(f"  BTC44       : {case.btc_legacy}")
+    console.print(f"  BTC84       : {case.btc_segwit}")
+    if case.balance_json:
+        console.print(f"  balances    : {case.balance_json[:200]}…")
     console.print(f"  context     : {case.context_preview}")
     console.print(f"  notes       : {case.notes}")
     console.print(f"  found_at    : {case.found_at}")
@@ -645,11 +765,18 @@ def notify_batch_cmd(
 @main.command("github-search")
 @click.option("--query", "queries", multiple=True, help="Override default search queries")
 @click.option("--max-per-query", default=5, show_default=True)
+@click.option(
+    "--check-balance/--no-check-balance",
+    default=True,
+    show_default=True,
+    help="Derive addresses + public balance check for each alert",
+)
 @click.option("--db", type=click.Path(path_type=Path), default=None)
 @_lang_option
 def github_search_cmd(
     queries: tuple[str, ...],
     max_per_query: int,
+    check_balance: bool,
     db: Path | None,
     lang: str | None,
     all_langs: bool,
@@ -668,30 +795,41 @@ def github_search_cmd(
         console.print(f"[red]{e}[/red]")
         sys.exit(1)
 
-    secret = _secret()
     store = _store(db)
     total = 0
+    funded = 0
     for hit in hits:
         for f in hit.findings:
             total += 1
-            fp = fingerprint(f.normalized, secret)
-            console.print(
-                f"[red]ALERT[/red] {hit.repo_full_name}:{hit.path}  "
-                f"{f.word_count}w/{f.language}  {hit.html_url}"
-            )
-            store.upsert_finding(
-                fingerprint=fp,
+            rec = store_finding(
+                store,
+                f,
                 source_type="github",
                 source_path=hit.repo_full_name,
                 file_path=hit.path,
-                word_count=f.word_count,
-                context_preview=f.context_preview,
                 commit_sha=hit.sha,
-                notes=f"lang={f.language}",
+                check_balance=check_balance,
             )
-    console.print(f"Actionable remote findings: [bold]{total}[/bold]")
+            color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
+            console.print(
+                f"[{color}]ALERT[/{color}] {hit.repo_full_name}:{hit.path}  "
+                f"{f.word_count}w/{f.language}  case=#{rec.case_id}  {hit.html_url}"
+            )
+            if rec.assessment:
+                console.print(f"  {format_assessment_line(rec.assessment)}")
+                if rec.assessment.addresses:
+                    console.print(f"  ETH {rec.assessment.addresses.eth}")
+                    console.print(f"  BTC84 {rec.assessment.addresses.btc_segwit}")
+                if rec.assessment.has_funds:
+                    funded += 1
+    console.print(
+        f"Actionable remote findings: [bold]{total}[/bold]  "
+        f"funded: [bold red]{funded}[/bold red]"
+    )
     if total:
-        console.print("[dim]Next: seedleak cases --status new && seedleak show <id> --draft[/dim]")
+        console.print(
+            "[dim]Next: seedleak cases --status new && seedleak show <id> --draft[/dim]"
+        )
     sys.exit(2 if total else 0)
 
 

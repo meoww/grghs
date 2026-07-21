@@ -13,11 +13,14 @@ authors = [{ name = "seed-leak-alert" }]
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
+    "httpx>=0.27",
+    "bip-utils>=2.9",
 ]
 
 [project.optional-dependencies]
 github = ["httpx>=0.27"]
-dev = ["pytest>=8.0", "httpx>=0.27"]
+liveness = ["bip-utils>=2.9", "httpx>=0.27"]
+dev = ["pytest>=8.0", "httpx>=0.27", "bip-utils>=2.9"]
 
 [project.scripts]
 seedleak = "seedleak.cli:main"

@@ -39,12 +39,31 @@ CREATE TABLE IF NOT EXISTS cases (
     notes           TEXT,
     notify_url      TEXT,
     notify_channel  TEXT,
+    priority        TEXT,
+    has_funds       INTEGER NOT NULL DEFAULT 0,
+    eth_address     TEXT,
+    btc_legacy      TEXT,
+    btc_segwit      TEXT,
+    balance_json    TEXT,
     UNIQUE(fingerprint, source_path, file_path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
 CREATE INDEX IF NOT EXISTS idx_cases_fp ON cases(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_cases_priority ON cases(priority);
+CREATE INDEX IF NOT EXISTS idx_cases_funds ON cases(has_funds);
 """
+
+_MIGRATE_COLS = {
+    "notify_url": "TEXT",
+    "notify_channel": "TEXT",
+    "priority": "TEXT",
+    "has_funds": "INTEGER NOT NULL DEFAULT 0",
+    "eth_address": "TEXT",
+    "btc_legacy": "TEXT",
+    "btc_segwit": "TEXT",
+    "balance_json": "TEXT",
+}
 
 
 def _utcnow() -> str:
@@ -69,6 +88,12 @@ class Case:
     notes: str | None
     notify_url: str | None = None
     notify_channel: str | None = None
+    priority: str | None = None
+    has_funds: bool = False
+    eth_address: str | None = None
+    btc_legacy: str | None = None
+    btc_segwit: str | None = None
+    balance_json: str | None = None
 
 
 class CaseStore:
@@ -86,15 +111,10 @@ class CaseStore:
     def _init_db(self) -> None:
         with self._connect() as conn:
             conn.executescript(SCHEMA)
-            # Lightweight migrations for existing DBs
-            cols = {
-                r[1]
-                for r in conn.execute("PRAGMA table_info(cases)").fetchall()
-            }
-            if "notify_url" not in cols:
-                conn.execute("ALTER TABLE cases ADD COLUMN notify_url TEXT")
-            if "notify_channel" not in cols:
-                conn.execute("ALTER TABLE cases ADD COLUMN notify_channel TEXT")
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(cases)").fetchall()}
+            for name, decl in _MIGRATE_COLS.items():
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {decl}")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -119,8 +139,14 @@ class CaseStore:
         context_preview: str | None,
         commit_sha: str | None = None,
         notes: str | None = None,
+        priority: str | None = None,
+        has_funds: bool = False,
+        eth_address: str | None = None,
+        btc_legacy: str | None = None,
+        btc_segwit: str | None = None,
+        balance_json: str | None = None,
     ) -> tuple[int, bool]:
-        """Insert or ignore duplicate. Returns (case_id, created)."""
+        """Insert or update balance metadata on duplicate. Returns (case_id, created)."""
         now = _utcnow()
         with self.connection() as conn:
             cur = conn.execute(
@@ -128,8 +154,9 @@ class CaseStore:
                 INSERT INTO cases (
                     fingerprint, source_type, source_path, file_path,
                     commit_sha, word_count, context_preview, status,
-                    found_at, updated_at, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    found_at, updated_at, notes, priority, has_funds,
+                    eth_address, btc_legacy, btc_segwit, balance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint, source_path, file_path) DO NOTHING
                 """,
                 (
@@ -144,6 +171,12 @@ class CaseStore:
                     now,
                     now,
                     notes,
+                    priority,
+                    1 if has_funds else 0,
+                    eth_address,
+                    btc_legacy,
+                    btc_segwit,
+                    balance_json,
                 ),
             )
             if cur.rowcount == 1:
@@ -157,24 +190,57 @@ class CaseStore:
                 """,
                 (fingerprint, source_path, file_path, file_path),
             ).fetchone()
-            return int(row["id"]), False
+            cid = int(row["id"])
+            # Refresh balance metadata if we just re-checked
+            if balance_json is not None or priority is not None:
+                conn.execute(
+                    """
+                    UPDATE cases SET
+                        updated_at = ?,
+                        priority = COALESCE(?, priority),
+                        has_funds = COALESCE(?, has_funds),
+                        eth_address = COALESCE(?, eth_address),
+                        btc_legacy = COALESCE(?, btc_legacy),
+                        btc_segwit = COALESCE(?, btc_segwit),
+                        balance_json = COALESCE(?, balance_json)
+                    WHERE id = ?
+                    """,
+                    (
+                        now,
+                        priority,
+                        (1 if has_funds else 0) if balance_json is not None else None,
+                        eth_address,
+                        btc_legacy,
+                        btc_segwit,
+                        balance_json,
+                        cid,
+                    ),
+                )
+            return cid, False
 
     def list_cases(
         self,
         status: str | None = None,
+        *,
+        has_funds: bool | None = None,
         limit: int = 100,
     ) -> list[Case]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if has_funds is not None:
+            clauses.append("has_funds = ?")
+            params.append(1 if has_funds else 0)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
         with self.connection() as conn:
-            if status:
-                rows = conn.execute(
-                    "SELECT * FROM cases WHERE status = ? ORDER BY id DESC LIMIT ?",
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM cases ORDER BY id DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM cases {where} "
+                f"ORDER BY has_funds DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
         return [self._row_to_case(r) for r in rows]
 
     def get(self, case_id: int) -> Case | None:
@@ -231,8 +297,12 @@ class CaseStore:
                 "SELECT status, COUNT(*) AS n FROM cases GROUP BY status"
             ).fetchall()
             total = conn.execute("SELECT COUNT(*) AS n FROM cases").fetchone()["n"]
+            funds = conn.execute(
+                "SELECT COUNT(*) AS n FROM cases WHERE has_funds = 1"
+            ).fetchone()["n"]
         out = {r["status"]: int(r["n"]) for r in rows}
         out["total"] = int(total)
+        out["has_funds"] = int(funds)
         return out
 
     def export_cases(
@@ -259,7 +329,11 @@ class CaseStore:
 
     @staticmethod
     def _row_to_case(row: sqlite3.Row) -> Case:
-        keys = row.keys()
+        keys = set(row.keys())
+
+        def g(name: str, default=None):
+            return row[name] if name in keys else default
+
         return Case(
             id=row["id"],
             fingerprint=row["fingerprint"],
@@ -275,6 +349,12 @@ class CaseStore:
             notify_attempts=row["notify_attempts"],
             last_notified_at=row["last_notified_at"],
             notes=row["notes"],
-            notify_url=row["notify_url"] if "notify_url" in keys else None,
-            notify_channel=row["notify_channel"] if "notify_channel" in keys else None,
+            notify_url=g("notify_url"),
+            notify_channel=g("notify_channel"),
+            priority=g("priority"),
+            has_funds=bool(g("has_funds") or 0),
+            eth_address=g("eth_address"),
+            btc_legacy=g("btc_legacy"),
+            btc_segwit=g("btc_segwit"),
+            balance_json=g("balance_json"),
         )

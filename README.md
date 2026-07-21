@@ -50,7 +50,35 @@ seedleak scan-text --lang spanish,english --stdin < dump.txt
 seedleak scan-path ./repo --all-langs
 ```
 
-Exit codes: `0` clean, `2` actionable findings, `1` error.
+Exit codes: `0` clean, `2` actionable findings, `1` error, `3` funded wallet (assess).
+
+## Validity + network + balances
+
+```bash
+# Full assess (checksum → HD addresses → public balances). Never stores the seed.
+seedleak assess "word1 word2 ... word12"
+seedleak assess --stdin < phrase.txt
+seedleak assess --json --stdin < phrase.txt   # metadata only
+
+# Search GitHub and check balances on each alert (default on)
+seedleak github-search --max-per-query 5 --check-balance
+
+# Local file with balance check
+seedleak scan-file ./leak.env --check-balance
+```
+
+**What is checked (read-only public data):**
+
+| Network | Path | What |
+|---------|------|------|
+| Ethereum | `m/44'/60'/0'/0/0` | ETH balance + ERC-20 USDT |
+| Bitcoin | `m/44'/0'/0'/0/0` | Legacy BTC |
+| Bitcoin | `m/84'/0'/0'/0/0` | Native segwit BTC |
+
+Optional env: `SEEDLEAK_ETH_RPC`, `SEEDLEAK_BTC_API`.
+
+**Policy:** private keys never leave memory; only addresses + balance metadata are stored for prioritising **responsible disclosure**. No send/transfer code.
+
 
 ## Languages
 
