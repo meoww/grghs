@@ -166,13 +166,14 @@ KEYWORD_QUERIES: tuple[SearchQuery, ...] = (
         "keyword",
         "MetaMask recovery wording",
     ),
+    # Avoid parentheses / complex boolean — GitHub code search often returns 422
     SearchQuery(
-        '"12 words" (mnemonic OR seed OR wallet) private -test',
+        '"12 words" mnemonic seed wallet -test',
         "keyword",
         "12-word mention",
     ),
     SearchQuery(
-        '"24 words" (mnemonic OR seed) -test -example',
+        '"24 words" mnemonic seed -test -example',
         "keyword",
         "24-word mention",
     ),
@@ -869,7 +870,8 @@ def build_bip39_ngram_queries(
     while len(out) < count and i + n <= len(words):
         gram = " ".join(words[i : i + n])
         # Require wallet-ish context; drop obvious wordlist paths when possible
-        q = f'"{gram}" (mnemonic OR seed OR wallet OR bip39 OR recovery)'
+        # Keep query simple for GitHub code search (no paren groups → fewer 422s)
+        q = f'"{gram}" mnemonic OR seed OR wallet OR bip39'
         out.append(
             SearchQuery(
                 q,

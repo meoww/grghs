@@ -347,6 +347,19 @@ class CaseStore:
             ).fetchone()
         return self._row_to_case(row) if row else None
 
+    def find_by_fingerprint(self, fingerprint: str) -> Case | None:
+        """Return any case with this fingerprint that already has balance data."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM cases
+                WHERE fingerprint = ? AND balance_json IS NOT NULL
+                ORDER BY secret_stored DESC, id DESC LIMIT 1
+                """,
+                (fingerprint,),
+            ).fetchone()
+        return self._row_to_case(row) if row else None
+
     def set_status(
         self,
         case_id: int,

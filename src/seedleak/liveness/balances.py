@@ -668,13 +668,16 @@ def check_balances(
     btc_segwit: str | None = None,
     check_usdt: bool = True,
     max_workers: int = 12,
+    chain_ids: list[str] | None = None,
 ) -> BalanceReport:
     """Query public balances for derived addresses (parallel).
 
     Accepts either a DerivedWallet or legacy eth/btc kwargs.
+    ``chain_ids`` limits which chains are probed (None = all with balance).
     """
     report = BalanceReport()
     entries = list(wallet.entries) if wallet else []
+    allow = set(chain_ids) if chain_ids else None
 
     # Legacy kwargs → synthetic entries at index 0
     if eth or btc_legacy or btc_segwit:
@@ -696,6 +699,8 @@ def check_balances(
     seen: set[tuple[str, int, str]] = set()
     for entry in entries:
         base_id = entry.chain_id.split("#")[0]
+        if allow is not None and base_id not in allow:
+            continue
         spec = specs.get(base_id)
         if not spec or spec.balance == BalanceKind.NONE:
             continue

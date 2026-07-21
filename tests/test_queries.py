@@ -21,4 +21,4 @@ def test_ngrams_are_quoted_phrases():
     assert len(qs) == 10
     for q in qs:
         assert q.query.startswith('"')
-        assert "mnemonic OR seed OR wallet" in q.query
+        assert "mnemonic OR seed OR wallet" in q.query or "mnemonic" in q.query

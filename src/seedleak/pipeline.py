@@ -34,12 +34,14 @@ def assess_finding(
     *,
     check_balance: bool,
     indexes: list[int] | str | None = None,
+    balance_mode: str = "full",
 ) -> Assessment:
     return assess_mnemonic(
         finding.normalized,
         language=finding.language if finding.language != "custom" else "english",
         check_balance=check_balance,
         indexes=indexes,
+        balance_mode=balance_mode,
     )
 
 
@@ -85,6 +87,7 @@ def store_finding(
     search_query: str | None = None,
     query_category: str | None = None,
     query_note: str | None = None,
+    balance_mode: str = "full",
 ) -> RecordedFinding:
     """Fingerprint, optional multi-chain balance check, store metadata.
 
@@ -101,10 +104,25 @@ def store_finding(
     secret_ok = False
     funded_summary: str | None = None
 
+    # Skip full re-check if this fingerprint already balance-scanned
+    fp_early = fp_fn(finding.normalized, sec)
+    existing = store.find_by_fingerprint(fp_early)
+    if existing and existing.balance_json:
+        return RecordedFinding(
+            case_id=existing.id,
+            created=False,
+            fingerprint=fp_early,
+            assessment=None,
+            finding=finding,
+            secret_stored=bool(existing.secret_stored),
+        )
+
+    do_balance = check_balance and not finding.is_denylisted
     assessment = assess_finding(
         finding,
-        check_balance=check_balance,
+        check_balance=do_balance,
         indexes=indexes,
+        balance_mode=balance_mode,
     )
     fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
     if assessment.addresses:

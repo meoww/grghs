@@ -931,39 +931,52 @@ def list_queries_cmd(ngrams: bool, ngram_count: int) -> None:
 )
 @click.option(
     "--indexes",
-    default="0-5",
+    default="0",
     show_default=True,
-    help="HD address indexes for balance severity, e.g. 0-5",
+    help="HD address indexes (fast default: 0; deep: 0-5)",
+)
+@click.option(
+    "--fast/--full",
+    default=True,
+    show_default=True,
+    help="Fast: index 0 + core chains only; full: all chains/tokens",
 )
 @click.option(
     "--all-langs/--english-only",
-    default=True,
+    default=False,
     show_default=True,
-    help="Detect BIP39 in all bundled languages (default on for hunt)",
+    help="All BIP39 languages (slower; default english-only for speed)",
 )
-@click.option("--lang", default=None, help="Override languages (disables default all-langs if set)")
+@click.option("--lang", default=None, help="Override languages")
 @click.option(
     "--no-ngrams",
     is_flag=True,
     help="Disable BIP39 word n-gram queries in the default catalog",
 )
-@click.option("--ngram-count", default=40, show_default=True, help="How many 3-gram queries")
+@click.option("--ngram-count", default=20, show_default=True, help="How many 3-gram queries")
+@click.option(
+    "--max-per-file",
+    default=3,
+    show_default=True,
+    help="Max findings with balance check per file (rest skip network)",
+)
 @click.option("--db", type=click.Path(path_type=Path), default=None)
 def github_search_cmd(
     queries: tuple[str, ...],
     max_per_query: int,
     check_balance: bool,
     indexes: str,
+    fast: bool,
     all_langs: bool,
     lang: str | None,
     no_ngrams: bool,
     ngram_count: int,
+    max_per_file: int,
     db: Path | None,
 ) -> None:
     """Search public GitHub code (requires GITHUB_TOKEN). Rate-limit aware.
 
-    Default query catalog: SDK/code constructs + .env patterns + BIP39 n-grams.
-    Each finding stores the search_query that discovered it.
+    Default is --fast (index 0, core chains). Use --full --indexes 0-5 for deep.
     """
     from seedleak.collectors.github_search import search_and_scan
     from seedleak.collectors.queries import default_hunt_queries
@@ -973,18 +986,23 @@ def github_search_cmd(
         languages = _parse_langs(lang, False)
     else:
         languages = _parse_langs(None, all_langs)
+    # Fast mode forces single index unless user passed multi via indexes explicitly
+    # (indexes still honored as given; default CLI is "0")
     idx = parse_indexes(indexes)
+    balance_mode = "fast" if fast else "full"
 
     if queries:
         qlist = list(queries)
     else:
         qlist = default_hunt_queries(
-            include_ngrams=not no_ngrams,
-            ngram_count=ngram_count,
+            include_ngrams=not no_ngrams and not fast,
+            ngram_count=ngram_count if not fast else 0,
+            include_keyword=True,
         )
     console.print(
-        f"Hunt queries={len(qlist)} langs={len(languages)} "
-        f"indexes={idx[0]}-{idx[-1]} balance={check_balance}"
+        f"Hunt mode={'fast' if fast else 'full'} queries={len(qlist)} "
+        f"langs={len(languages)} indexes={idx[0]}-{idx[-1]} "
+        f"balance={check_balance} max_per_file={max_per_file}"
     )
     try:
         hits, stats = search_and_scan(
@@ -1006,9 +1024,17 @@ def github_search_cmd(
     total = 0
     funded = 0
     vaulted = 0
+    skipped_bal = 0
     for hit in hits:
+        # Cap expensive balance checks per file (test vector dumps)
+        bal_left = max_per_file if check_balance else 0
         for f in hit.findings:
             total += 1
+            do_bal = check_balance and bal_left > 0 and not f.is_denylisted
+            if check_balance and not do_bal:
+                skipped_bal += 1
+            if do_bal:
+                bal_left -= 1
             rec = store_finding(
                 store,
                 f,
@@ -1016,12 +1042,13 @@ def github_search_cmd(
                 source_path=hit.repo_full_name,
                 file_path=hit.path,
                 commit_sha=hit.sha,
-                check_balance=check_balance,
+                check_balance=do_bal,
                 indexes=idx,
                 source_url=hit.html_url or None,
                 search_query=hit.search_query or None,
                 query_category=hit.query_category or None,
                 query_note=hit.query_note or None,
+                balance_mode=balance_mode,
             )
             color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
             vault_tag = " [vault]" if rec.secret_stored else ""
@@ -1055,7 +1082,7 @@ def github_search_cmd(
                 )
     console.print(
         f"Queries run: {stats.queries_run}  items: {stats.items_seen}  "
-        f"files scanned: {stats.files_scanned}"
+        f"files scanned: {stats.files_scanned}  bal_skipped={skipped_bal}"
     )
     console.print(
         f"Actionable findings: [bold]{total}[/bold]  "

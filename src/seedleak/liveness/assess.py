@@ -10,7 +10,7 @@ from typing import Any
 from seedleak.detector.bip39 import LANGUAGES, load_wordlist, validate_checksum
 from seedleak.detector.denylist import load_denylist
 from seedleak.liveness.balances import BalanceReport, check_balances
-from seedleak.liveness.chains import list_chain_ids
+from seedleak.liveness.chains import list_chain_ids, resolve_balance_chain_ids
 from seedleak.liveness.derive import (
     DEFAULT_INDEXES,
     DerivedWallet,
@@ -103,6 +103,7 @@ def assess_mnemonic(
     chain_ids: list[str] | None = None,
     address_index: int | None = None,
     indexes: list[int] | str | None = None,
+    balance_mode: str = "full",
 ) -> Assessment:
     """Full multi-chain / multi-index pipeline. Do not persist the mnemonic."""
     words = mnemonic.strip().lower().split()
@@ -154,10 +155,19 @@ def assess_mnemonic(
     else:
         idx_list = list(DEFAULT_INDEXES)
 
+    # Fast mode: fewer chains for both derive (balance subset) and probes
+    bal_ids = chain_ids
+    if bal_ids is None and check_balance:
+        bal_ids = resolve_balance_chain_ids(balance_mode)
+
     try:
+        # Always derive at least balance-relevant chains; full set if mode=full
+        derive_ids = bal_ids
+        if balance_mode in ("full", "all") or not check_balance:
+            derive_ids = chain_ids  # None = all chains
         addrs = derive_addresses(
             normalized,
-            chain_ids=chain_ids,
+            chain_ids=derive_ids,
             indexes=idx_list,
         )
     except Exception as e:
@@ -174,16 +184,23 @@ def assess_mnemonic(
         )
 
     balances = None
-    if check_balance:
+    if check_balance and not denylisted:
+        # Skip network I/O for known test vectors — huge speed win
         try:
             workers = int(os.environ.get("SEEDLEAK_BALANCE_WORKERS", "16"))
+            if balance_mode in ("fast", "quick"):
+                workers = min(workers, 12)
+                check_usdt = False  # native only in fast mode
             balances = check_balances(
                 addrs,
                 check_usdt=check_usdt,
                 max_workers=workers,
+                chain_ids=bal_ids,
             )
         except Exception as e:
             balances = BalanceReport(errors=[str(e)])
+    elif check_balance and denylisted:
+        balances = BalanceReport(errors=["skipped: denylist"])
 
     return Assessment(
         valid_checksum=True,

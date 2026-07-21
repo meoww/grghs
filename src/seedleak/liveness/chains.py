@@ -413,6 +413,33 @@ def list_chain_ids() -> list[str]:
     return [s.id for s in CHAIN_SPECS]
 
 
+# Fast hunt: only chains with useful public balance APIs + high wallet coverage.
+FAST_BALANCE_CHAIN_IDS: tuple[str, ...] = (
+    "eth",
+    "btc_segwit",
+    "btc_legacy",
+    "bsc",
+    "polygon",
+    "tron",
+    "sol",
+    "xrp",
+    "atom",
+    "arbitrum",
+    "base",
+)
+
+
+def resolve_balance_chain_ids(mode: str = "full") -> list[str] | None:
+    """Return chain_ids for balance probes, or None for all balance-capable."""
+    m = (mode or "full").lower()
+    if m in ("full", "all"):
+        return None
+    if m in ("fast", "quick"):
+        return list(FAST_BALANCE_CHAIN_IDS)
+    # comma-separated custom
+    return [x.strip() for x in m.split(",") if x.strip()]
+
+
 def resolve_bip_coin(name: str, family: Family = Family.BIP44):
     """Return bip_utils coin enum value by name for the given path family."""
     from bip_utils import Bip44Coins, Bip84Coins
