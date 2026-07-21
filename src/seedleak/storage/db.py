@@ -60,9 +60,6 @@ CREATE TABLE IF NOT EXISTS cases (
 
 CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
 CREATE INDEX IF NOT EXISTS idx_cases_fp ON cases(fingerprint);
-CREATE INDEX IF NOT EXISTS idx_cases_priority ON cases(priority);
-CREATE INDEX IF NOT EXISTS idx_cases_funds ON cases(has_funds);
-CREATE INDEX IF NOT EXISTS idx_cases_secret ON cases(secret_stored);
 """
 
 _MIGRATE_COLS = {
@@ -137,7 +134,23 @@ class CaseStore:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(cases)").fetchall()}
             for name, decl in _MIGRATE_COLS.items():
                 if name not in cols:
-                    conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {decl}")
+                    # SQLite ALTER ADD COLUMN cannot use non-constant DEFAULT in some
+                    # forms; strip NOT NULL DEFAULT for safe migrate.
+                    safe = decl.replace("NOT NULL DEFAULT 0", "DEFAULT 0")
+                    conn.execute(f"ALTER TABLE cases ADD COLUMN {name} {safe}")
+            # Indexes that depend on migrated columns (after ALTER)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cases_priority ON cases(priority)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cases_funds ON cases(has_funds)"
+            )
+            if "secret_stored" in {
+                r[1] for r in conn.execute("PRAGMA table_info(cases)").fetchall()
+            }:
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_cases_secret ON cases(secret_stored)"
+                )
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
