@@ -1,4 +1,8 @@
-"""SQLite case store — metadata only, never plaintext mnemonics."""
+"""SQLite case store.
+
+Metadata for all findings. Encrypted mnemonic (Fernet) only for
+non-test (not denylist) findings with balance > 0 — see vault.py.
+"""
 
 from __future__ import annotations
 
@@ -46,6 +50,11 @@ CREATE TABLE IF NOT EXISTS cases (
     btc_segwit      TEXT,
     balance_json    TEXT,
     addresses_json  TEXT,
+    mnemonic_enc    TEXT,
+    secret_stored   INTEGER NOT NULL DEFAULT 0,
+    source_url      TEXT,
+    language        TEXT,
+    funded_summary  TEXT,
     UNIQUE(fingerprint, source_path, file_path)
 );
 
@@ -53,6 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
 CREATE INDEX IF NOT EXISTS idx_cases_fp ON cases(fingerprint);
 CREATE INDEX IF NOT EXISTS idx_cases_priority ON cases(priority);
 CREATE INDEX IF NOT EXISTS idx_cases_funds ON cases(has_funds);
+CREATE INDEX IF NOT EXISTS idx_cases_secret ON cases(secret_stored);
 """
 
 _MIGRATE_COLS = {
@@ -65,6 +75,11 @@ _MIGRATE_COLS = {
     "btc_segwit": "TEXT",
     "balance_json": "TEXT",
     "addresses_json": "TEXT",
+    "mnemonic_enc": "TEXT",
+    "secret_stored": "INTEGER NOT NULL DEFAULT 0",
+    "source_url": "TEXT",
+    "language": "TEXT",
+    "funded_summary": "TEXT",
 }
 
 
@@ -97,6 +112,11 @@ class Case:
     btc_segwit: str | None = None
     balance_json: str | None = None
     addresses_json: str | None = None
+    mnemonic_enc: str | None = None
+    secret_stored: bool = False
+    source_url: str | None = None
+    language: str | None = None
+    funded_summary: str | None = None
 
 
 class CaseStore:
@@ -149,8 +169,13 @@ class CaseStore:
         btc_segwit: str | None = None,
         balance_json: str | None = None,
         addresses_json: str | None = None,
+        mnemonic_enc: str | None = None,
+        secret_stored: bool = False,
+        source_url: str | None = None,
+        language: str | None = None,
+        funded_summary: str | None = None,
     ) -> tuple[int, bool]:
-        """Insert or update balance metadata on duplicate. Returns (case_id, created)."""
+        """Insert or update finding metadata. Returns (case_id, created)."""
         now = _utcnow()
         with self.connection() as conn:
             cur = conn.execute(
@@ -159,8 +184,9 @@ class CaseStore:
                     fingerprint, source_type, source_path, file_path,
                     commit_sha, word_count, context_preview, status,
                     found_at, updated_at, notes, priority, has_funds,
-                    eth_address, btc_legacy, btc_segwit, balance_json, addresses_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    eth_address, btc_legacy, btc_segwit, balance_json, addresses_json,
+                    mnemonic_enc, secret_stored, source_url, language, funded_summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint, source_path, file_path) DO NOTHING
                 """,
                 (
@@ -182,6 +208,11 @@ class CaseStore:
                     btc_segwit,
                     balance_json,
                     addresses_json,
+                    mnemonic_enc,
+                    1 if secret_stored else 0,
+                    source_url,
+                    language,
+                    funded_summary,
                 ),
             )
             if cur.rowcount == 1:
@@ -196,8 +227,13 @@ class CaseStore:
                 (fingerprint, source_path, file_path, file_path),
             ).fetchone()
             cid = int(row["id"])
-            # Refresh balance metadata if we just re-checked
-            if balance_json is not None or priority is not None or addresses_json is not None:
+            # Refresh metadata / vault if re-scanned
+            if (
+                balance_json is not None
+                or priority is not None
+                or addresses_json is not None
+                or mnemonic_enc is not None
+            ):
                 conn.execute(
                     """
                     UPDATE cases SET
@@ -208,7 +244,13 @@ class CaseStore:
                         btc_legacy = COALESCE(?, btc_legacy),
                         btc_segwit = COALESCE(?, btc_segwit),
                         balance_json = COALESCE(?, balance_json),
-                        addresses_json = COALESCE(?, addresses_json)
+                        addresses_json = COALESCE(?, addresses_json),
+                        mnemonic_enc = COALESCE(?, mnemonic_enc),
+                        secret_stored = CASE
+                            WHEN ? = 1 THEN 1 ELSE secret_stored END,
+                        source_url = COALESCE(?, source_url),
+                        language = COALESCE(?, language),
+                        funded_summary = COALESCE(?, funded_summary)
                     WHERE id = ?
                     """,
                     (
@@ -220,6 +262,11 @@ class CaseStore:
                         btc_segwit,
                         balance_json,
                         addresses_json,
+                        mnemonic_enc,
+                        1 if secret_stored else 0,
+                        source_url,
+                        language,
+                        funded_summary,
                         cid,
                     ),
                 )
@@ -230,6 +277,7 @@ class CaseStore:
         status: str | None = None,
         *,
         has_funds: bool | None = None,
+        secret_stored: bool | None = None,
         limit: int = 100,
     ) -> list[Case]:
         clauses: list[str] = []
@@ -240,15 +288,22 @@ class CaseStore:
         if has_funds is not None:
             clauses.append("has_funds = ?")
             params.append(1 if has_funds else 0)
+        if secret_stored is not None:
+            clauses.append("secret_stored = ?")
+            params.append(1 if secret_stored else 0)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         with self.connection() as conn:
             rows = conn.execute(
                 f"SELECT * FROM cases {where} "
-                f"ORDER BY has_funds DESC, id DESC LIMIT ?",
+                f"ORDER BY has_funds DESC, secret_stored DESC, id DESC LIMIT ?",
                 params,
             ).fetchall()
         return [self._row_to_case(r) for r in rows]
+
+    def list_vault(self, limit: int = 500) -> list[Case]:
+        """Cases with encrypted mnemonic stored (funded, non-test)."""
+        return self.list_cases(secret_stored=True, limit=limit)
 
     def get(self, case_id: int) -> Case | None:
         with self.connection() as conn:
@@ -307,9 +362,13 @@ class CaseStore:
             funds = conn.execute(
                 "SELECT COUNT(*) AS n FROM cases WHERE has_funds = 1"
             ).fetchone()["n"]
+            vault = conn.execute(
+                "SELECT COUNT(*) AS n FROM cases WHERE secret_stored = 1"
+            ).fetchone()["n"]
         out = {r["status"]: int(r["n"]) for r in rows}
         out["total"] = int(total)
         out["has_funds"] = int(funds)
+        out["vault"] = int(vault)
         return out
 
     def export_cases(
@@ -365,4 +424,9 @@ class CaseStore:
             btc_segwit=g("btc_segwit"),
             balance_json=g("balance_json"),
             addresses_json=g("addresses_json"),
+            mnemonic_enc=g("mnemonic_enc"),
+            secret_stored=bool(g("secret_stored") or 0),
+            source_url=g("source_url"),
+            language=g("language"),
+            funded_summary=g("funded_summary"),
         )

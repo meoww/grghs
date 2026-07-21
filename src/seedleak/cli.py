@@ -667,6 +667,7 @@ def cases_cmd(
     table.add_column("Status")
     table.add_column("Pri")
     table.add_column("$", justify="center")
+    table.add_column("V", justify="center")
     table.add_column("Words", justify="right")
     table.add_column("Source")
     table.add_column("File")
@@ -677,6 +678,7 @@ def cases_cmd(
             c.status,
             c.priority or "-",
             "Y" if c.has_funds else "",
+            "Y" if c.secret_stored else "",
             str(c.word_count),
             (c.source_path or "")[:32],
             (c.file_path or "")[:24],
@@ -706,6 +708,10 @@ def show_cmd(case_id: int, db: Path | None, draft: bool) -> None:
     console.print(f"  words       : {case.word_count}")
     console.print(f"  fingerprint : {case.fingerprint}")
     console.print(f"  priority    : {case.priority}  has_funds={case.has_funds}")
+    console.print(f"  language    : {case.language}")
+    console.print(f"  source_url  : {case.source_url}")
+    console.print(f"  vault       : secret_stored={case.secret_stored}")
+    console.print(f"  funded_sum  : {case.funded_summary}")
     console.print(f"  ETH         : {case.eth_address}")
     console.print(f"  BTC44       : {case.btc_legacy}")
     console.print(f"  BTC84       : {case.btc_segwit}")
@@ -784,10 +790,10 @@ def stats_cmd(db: Path | None) -> None:
 @click.option("--limit", default=10_000, show_default=True)
 @click.option("--db", type=click.Path(path_type=Path), default=None)
 def export_cmd(path: Path, status: str | None, limit: int, db: Path | None) -> None:
-    """Export case metadata to JSON (no secrets)."""
+    """Export case metadata to JSON (never includes decrypted mnemonics)."""
     store = _store(db)
     n = store.export_json(path, status=status, limit=limit)
-    console.print(f"Wrote {n} case(s) → {path}")
+    console.print(f"Wrote {n} case(s) → {path} (secrets stay encrypted/omitted)")
 
 
 @main.command("set-status")
@@ -968,10 +974,12 @@ def github_search_cmd(
                 commit_sha=hit.sha,
                 check_balance=check_balance,
                 indexes=idx,
+                source_url=hit.html_url or None,
             )
             color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
+            vault_tag = " [vault]" if rec.secret_stored else ""
             console.print(
-                f"[{color}]ALERT[/{color}] {hit.repo_full_name}:{hit.path}  "
+                f"[{color}]ALERT[/{color}]{vault_tag} {hit.repo_full_name}:{hit.path}  "
                 f"{f.word_count}w/{f.language}  case=#{rec.case_id}  {hit.html_url}"
             )
             if rec.assessment:
@@ -987,6 +995,11 @@ def github_search_cmd(
                         console.print(f"  SOL  {sol}")
                 if rec.assessment.has_funds:
                     funded += 1
+            if rec.secret_stored:
+                console.print(
+                    "  [yellow]encrypted mnemonic stored in vault "
+                    "(non-test + balance>0)[/yellow]"
+                )
     console.print(
         f"Actionable remote findings: [bold]{total}[/bold]  "
         f"funded: [bold red]{funded}[/bold red]"
@@ -996,6 +1009,161 @@ def github_search_cmd(
             "[dim]Next: seedleak cases --status new && seedleak show <id> --draft[/dim]"
         )
     sys.exit(2 if total else 0)
+
+
+@main.command("vault")
+@click.option("--limit", default=100, show_default=True)
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+def vault_cmd(limit: int, db: Path | None) -> None:
+    """List vault entries: non-test mnemonics with balance>0 (encrypted).
+
+    Shows path/source metadata only. Use ``vault-show`` to decrypt one entry.
+    """
+    store = _store(db)
+    rows = store.list_vault(limit=limit)
+    table = Table(title="Vault (funded, non-test, encrypted)")
+    table.add_column("ID", justify="right")
+    table.add_column("Source")
+    table.add_column("File")
+    table.add_column("URL")
+    table.add_column("Funds")
+    table.add_column("ETH")
+    for c in rows:
+        table.add_row(
+            str(c.id),
+            (c.source_path or "")[:28],
+            (c.file_path or "")[:22],
+            (c.source_url or "")[:36],
+            (c.funded_summary or "")[:28],
+            (c.eth_address or "")[:12] + "…" if c.eth_address else "",
+        )
+    console.print(table)
+    console.print(
+        f"[dim]{len(rows)} vault entr(y/ies). "
+        "Decrypt: seedleak vault-show <id>  |  export: seedleak vault-export out.json[/dim]"
+    )
+    if not rows:
+        console.print(
+            "[dim]Empty. Vault fills when a hunt finds non-denylist seed with balance>0.[/dim]"
+        )
+
+
+@main.command("vault-show")
+@click.argument("case_id", type=int)
+@click.option("--reveal", is_flag=True, help="Print decrypted mnemonic (sensitive!)")
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+def vault_show_cmd(case_id: int, reveal: bool, db: Path | None) -> None:
+    """Show vault case metadata; optionally decrypt mnemonic with --reveal."""
+    from seedleak.storage.vault import decrypt_mnemonic
+
+    store = _store(db)
+    case = store.get(case_id)
+    if not case:
+        console.print(f"[red]Case #{case_id} not found[/red]")
+        sys.exit(1)
+    if not case.secret_stored or not case.mnemonic_enc:
+        console.print(
+            f"[yellow]Case #{case_id} has no vault secret "
+            f"(secret_stored={case.secret_stored}, has_funds={case.has_funds})[/yellow]"
+        )
+        sys.exit(1)
+
+    console.print(f"[bold]Vault case #{case.id}[/bold]")
+    console.print(f"  source_path : {case.source_path}")
+    console.print(f"  file_path   : {case.file_path}")
+    console.print(f"  source_url  : {case.source_url}")
+    console.print(f"  commit      : {case.commit_sha}")
+    console.print(f"  language    : {case.language}  words={case.word_count}")
+    console.print(f"  fingerprint : {case.fingerprint}")
+    console.print(f"  found_at    : {case.found_at}")
+    console.print(f"  funded      : {case.funded_summary}")
+    console.print(f"  ETH         : {case.eth_address}")
+    console.print(f"  BTC84       : {case.btc_segwit}")
+    console.print(f"  context     : {case.context_preview}")
+    if case.balance_json:
+        console.print(f"  balances    : {case.balance_json[:300]}…")
+    if case.addresses_json:
+        console.print(f"  addresses   : stored ({len(case.addresses_json)} bytes)")
+
+    if reveal:
+        try:
+            mnemonic = decrypt_mnemonic(case.mnemonic_enc)
+        except Exception as e:
+            console.print(f"[red]Decrypt failed: {e}[/red]")
+            sys.exit(1)
+        console.print("[bold red]MNEMONIC (sensitive):[/bold red]")
+        # Print to stdout only so it can be piped carefully
+        click.echo(mnemonic)
+        console.print(
+            "[dim]Handle carefully. Do not paste into public issues/chats.[/dim]"
+        )
+    else:
+        console.print(
+            "[dim]Mnemonic encrypted. Re-run with --reveal to decrypt (sensitive).[/dim]"
+        )
+
+
+@main.command("vault-export")
+@click.argument("path", type=click.Path(path_type=Path))
+@click.option(
+    "--reveal",
+    is_flag=True,
+    help="Include decrypted mnemonics in JSON (VERY sensitive)",
+)
+@click.option("--limit", default=10_000, show_default=True)
+@click.option("--db", type=click.Path(path_type=Path), default=None)
+def vault_export_cmd(
+    path: Path,
+    reveal: bool,
+    limit: int,
+    db: Path | None,
+) -> None:
+    """Export vault cases to JSON (path, balances, addresses; optional mnemonics)."""
+    from seedleak.storage.vault import decrypt_mnemonic
+
+    store = _store(db)
+    rows = store.list_vault(limit=limit)
+    out = []
+    for c in rows:
+        item = {
+            "id": c.id,
+            "fingerprint": c.fingerprint,
+            "source_type": c.source_type,
+            "source_path": c.source_path,
+            "file_path": c.file_path,
+            "source_url": c.source_url,
+            "commit_sha": c.commit_sha,
+            "language": c.language,
+            "word_count": c.word_count,
+            "found_at": c.found_at,
+            "priority": c.priority,
+            "has_funds": c.has_funds,
+            "funded_summary": c.funded_summary,
+            "eth_address": c.eth_address,
+            "btc_legacy": c.btc_legacy,
+            "btc_segwit": c.btc_segwit,
+            "context_preview": c.context_preview,
+            "notes": c.notes,
+            "balance_json": json.loads(c.balance_json) if c.balance_json else None,
+            "addresses_json": json.loads(c.addresses_json) if c.addresses_json else None,
+            "secret_stored": c.secret_stored,
+        }
+        if reveal and c.mnemonic_enc:
+            try:
+                item["mnemonic"] = decrypt_mnemonic(c.mnemonic_enc)
+            except Exception as e:
+                item["mnemonic_error"] = str(e)
+        out.append(item)
+
+    path.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    msg = f"Wrote {len(out)} vault case(s) → {path}"
+    if reveal:
+        msg += " [INCLUDES PLAINTEXT MNEMONICS — protect this file]"
+    console.print(msg)
 
 
 @main.command("auth-check")

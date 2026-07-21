@@ -1,4 +1,10 @@
-"""Shared scan→assess→store helpers (never persist mnemonics)."""
+"""Shared scan→assess→store helpers.
+
+Policy for secret storage:
+  - Encrypt and store mnemonic ONLY if not denylist AND has_funds.
+  - Always store path/source/addresses/balances metadata.
+  - Never print secrets in notify templates.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +16,7 @@ from seedleak.liveness.assess import Assessment, assess_mnemonic
 from seedleak.storage.db import CaseStore
 from seedleak.storage.fingerprint import fingerprint as fp_fn
 from seedleak.storage.fingerprint import load_or_create_secret
+from seedleak.storage.vault import encrypt_mnemonic, should_store_secret
 
 
 @dataclass
@@ -19,6 +26,7 @@ class RecordedFinding:
     fingerprint: str
     assessment: Assessment | None
     finding: Finding
+    secret_stored: bool = False
 
 
 def assess_finding(
@@ -35,6 +43,31 @@ def assess_finding(
     )
 
 
+def _build_source_url(
+    *,
+    source_type: str,
+    source_path: str,
+    file_path: str | None,
+    commit_sha: str | None,
+    explicit: str | None = None,
+) -> str | None:
+    if explicit:
+        return explicit
+    if source_type != "github":
+        # Local absolute path
+        if file_path and source_path:
+            return f"{source_path.rstrip('/')}/{file_path.lstrip('/')}"
+        return source_path
+    # owner/repo
+    if "/" not in source_path or source_path.startswith("/"):
+        return None
+    base = f"https://github.com/{source_path}"
+    if not file_path:
+        return base
+    ref = commit_sha or "HEAD"
+    return f"{base}/blob/{ref}/{file_path}"
+
+
 def store_finding(
     store: CaseStore,
     finding: Finding,
@@ -47,15 +80,23 @@ def store_finding(
     check_balance: bool = False,
     secret: bytes | None = None,
     indexes: list[int] | str | None = None,
+    source_url: str | None = None,
+    store_secrets: bool = True,
 ) -> RecordedFinding:
-    """Fingerprint, optional multi-chain balance check, store metadata, drop seed."""
+    """Fingerprint, optional multi-chain balance check, store metadata.
+
+    When ``store_secrets`` and the finding is non-test with funds, the
+    mnemonic is encrypted into ``mnemonic_enc`` (local vault key).
+    """
     sec = secret or load_or_create_secret()
-    assessment: Assessment | None = None
     bal_json: str | None = None
     priority = None
     has_funds = False
     eth = btc44 = btc84 = None
     addresses_json: str | None = None
+    mnemonic_enc: str | None = None
+    secret_ok = False
+    funded_summary: str | None = None
 
     assessment = assess_finding(
         finding,
@@ -79,19 +120,44 @@ def store_finding(
         bal_json = json.dumps(assessment.balances.to_dict(), ensure_ascii=False)
         priority = assessment.priority
         has_funds = assessment.has_funds
+        if has_funds:
+            funded_summary = assessment.balances.summary_line(max_parts=20)
     elif assessment.priority:
         priority = assessment.priority
+
+    denylisted = bool(assessment.denylisted or finding.is_denylisted)
+    if store_secrets and should_store_secret(
+        denylisted=denylisted,
+        has_funds=has_funds,
+        valid_checksum=assessment.valid_checksum and finding.checksum_valid,
+    ):
+        try:
+            mnemonic_enc = encrypt_mnemonic(finding.normalized)
+            secret_ok = True
+        except Exception:
+            mnemonic_enc = None
+            secret_ok = False
 
     note_parts = [notes] if notes else []
     if finding.language:
         note_parts.append(f"lang={finding.language}")
     if priority:
         note_parts.append(f"priority={priority}")
-    if assessment and assessment.chains_derived:
+    if assessment.chains_derived:
         note_parts.append(f"chains={assessment.chains_derived}")
-    if assessment and assessment.indexes:
+    if assessment.indexes:
         note_parts.append(f"idx={','.join(map(str, assessment.indexes))}")
+    if secret_ok:
+        note_parts.append("vault=1")
     merged_notes = ";".join(p for p in note_parts if p)
+
+    url = _build_source_url(
+        source_type=source_type,
+        source_path=source_path,
+        file_path=file_path,
+        commit_sha=commit_sha,
+        explicit=source_url,
+    )
 
     cid, created = store.upsert_finding(
         fingerprint=fp,
@@ -109,6 +175,11 @@ def store_finding(
         btc_segwit=btc84,
         balance_json=bal_json,
         addresses_json=addresses_json,
+        mnemonic_enc=mnemonic_enc,
+        secret_stored=secret_ok,
+        source_url=url,
+        language=finding.language or assessment.language,
+        funded_summary=funded_summary,
     )
     return RecordedFinding(
         case_id=cid,
@@ -116,6 +187,7 @@ def store_finding(
         fingerprint=fp,
         assessment=assessment,
         finding=finding,
+        secret_stored=secret_ok,
     )
 
 

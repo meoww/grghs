@@ -88,7 +88,25 @@ Chains with `balance=none` still get addresses stored for disclosure context.
 
 Optional env: `SEEDLEAK_ETH_RPC`, `SEEDLEAK_BTC_API`, `SEEDLEAK_SOL_RPC`, `SEEDLEAK_TRON_API`, `SEEDLEAK_BALANCE_WORKERS`.
 
-**Policy:** private keys never leave memory; only addresses + balance metadata are stored for prioritising **responsible disclosure**. No send/transfer code. Default HD indexes **0–5** (`--indexes 0` to limit).
+### Vault (funded non-test mnemonics)
+
+When a finding is **not** a known test vector **and** has **balance > 0**, the mnemonic is stored **encrypted** (Fernet, key in `$SEEDLEAK_HOME/vault.key`) together with:
+
+- `source_path` / `file_path` / `source_url` / `commit_sha`
+- language, word count, fingerprint, redacted context
+- addresses + full balance JSON + funded summary
+
+```bash
+seedleak vault                    # list vault entries (no plaintext)
+seedleak vault-show 3             # metadata only
+seedleak vault-show 3 --reveal    # decrypt one mnemonic (sensitive)
+seedleak vault-export vault.json          # metadata JSON
+seedleak vault-export out.json --reveal   # includes mnemonics — chmod 600
+```
+
+Test/demo vectors (denylist) are **never** vaulted even if dusty balances appear.
+
+**Policy:** no send/transfer code. Vault is for severity/remediation tracking of real exposures. Protect `vault.key` and any `--reveal` exports. Default HD indexes **0–5**.
 
 
 ## Languages
