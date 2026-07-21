@@ -58,29 +58,37 @@ Exit codes: `0` clean, `2` actionable findings, `1` error, `3` funded wallet (as
 # List supported chains
 seedleak chains
 
-# Full assess (checksum → many HD wallets → public balances). Never stores the seed.
-seedleak assess "word1 word2 ... word12"
-seedleak assess --show-all-addresses "..."
-seedleak assess --json --stdin < phrase.txt   # metadata only
+# Full assess (checksum → many HD wallets × indexes → public balances)
+seedleak assess "word1 word2 ... word12"          # indexes 0-5 by default
+seedleak assess --indexes 0-2 --show-all-addresses "..."
+seedleak assess --json --stdin < phrase.txt
 seedleak assess --lang auto --stdin < phrase.txt
 
-# Search GitHub and check balances on each alert (default on)
-seedleak github-search --max-per-query 5 --check-balance
+# Hunt: all BIP39 languages + indexes 0-5 + multi-chain balances (defaults)
+seedleak github-search --max-per-query 5
+seedleak github-search --english-only --indexes 0
 seedleak scan-file ./leak.env --check-balance
 ```
 
-**Derivation (index 0 by default)** includes major wallet ecosystems, among others:
+**Derivation (indexes 0–5 by default)** includes major wallet ecosystems, among others:
 
 - Bitcoin (BIP44 + BIP84), Litecoin, Dogecoin, BCH, Dash  
 - Ethereum + EVM: BSC, Polygon, Avalanche C, Arbitrum, Optimism, Base, Fantom, Celo, ETC  
 - TRON (+ TRC-20 USDT), Solana, Cosmos Hub, XRP, Aptos, Sui  
 - Also derived for inventory: NEAR, Polkadot, Algorand, Filecoin, BNB Beacon, …
 
-**Balance probes (read-only public RPCs/APIs)** where available: native coins + USDT/USDC on major EVMs + TRC-20 USDT. Chains with `balance=none` still get addresses stored for disclosure context.
+**Balance probes (read-only public RPCs/APIs)** where available:
+
+- Native coins on BTC/EVM/TRON/SOL/COSMOS/XRP/APT/SUI  
+- USDT/USDC (and more) on major EVMs  
+- **TRC-20**: known list + any non-zero TRC-20 from TronGrid  
+- **SPL**: USDT/USDC/PYUSD/… + any non-zero token accounts  
+
+Chains with `balance=none` still get addresses stored for disclosure context.
 
 Optional env: `SEEDLEAK_ETH_RPC`, `SEEDLEAK_BTC_API`, `SEEDLEAK_SOL_RPC`, `SEEDLEAK_TRON_API`, `SEEDLEAK_BALANCE_WORKERS`.
 
-**Policy:** private keys never leave memory; only addresses + balance metadata are stored for prioritising **responsible disclosure**. No send/transfer code. Index 0 only by default (`--index N` to check another).
+**Policy:** private keys never leave memory; only addresses + balance metadata are stored for prioritising **responsible disclosure**. No send/transfer code. Default HD indexes **0–5** (`--indexes 0` to limit).
 
 
 ## Languages

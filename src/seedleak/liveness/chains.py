@@ -279,7 +279,22 @@ CHAIN_SPECS: tuple[ChainSpec, ...] = (
         bip_coin="TRON",
         balance=BalanceKind.TRON,
         decimals=6,
-        tokens=(("USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6),),  # TRC-20 USDT
+        tokens=(
+            # Major TRC-20 stables / commons
+            ("USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", 6),
+            ("USDC", "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8", 6),
+            ("TUSD", "TUpMhErZL2fhh4sVNULAbNKLokS4GjC1F4", 18),
+            ("USDD", "TPYmHEhy5n8TCEfYGqW2rPxsghSfzghPDn", 18),
+            ("USDJ", "TMwFHYXLJaRUPeW6421aqXL4ZEzPRFGkGT", 18),
+            ("WTRX", "TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR", 6),
+            ("JST", "TCFLL5dx5ZJdKnWuesXxi1VPwjLVmWZZy9", 18),
+            ("SUN", "TSSMHYeV2uE9qYH95DqyoCuNCzEL1NvU3S", 18),
+            ("BTT", "TAFjULxiVgT4qWk6UZwjqwZXTSaGaqnVp4", 18),
+            ("WIN", "TLa2f6VPqDgRE67v1736s7bJ8Ray5wYjU7", 6),
+            ("NFT", "TFczxzPhnThNSqr5by8tvxsdCFRRz6cPNh", 6),
+            ("BTC", "TN3W4H6rK2ce4vX9YnFQHwKENnHjoxb3m9", 8),  # BTC TRC20
+            ("ETH", "THb4CqiFdwNHsWsQCs4JhzwjMWys4aqCbF", 18),
+        ),
         path="m/44'/195'/0'/0/0",
     ),
     ChainSpec(
@@ -289,6 +304,19 @@ CHAIN_SPECS: tuple[ChainSpec, ...] = (
         bip_coin="SOLANA",
         balance=BalanceKind.SOLANA,
         decimals=9,
+        # SPL mints (symbol, mint, decimals)
+        tokens=(
+            ("USDT", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", 6),
+            ("USDC", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", 6),
+            ("PYUSD", "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaYmCZfHsFu24GXo", 6),
+            ("EURC", "HzwqbKZw8HxMN6bF2yFZNrht3c2iXXzpKcFu7uBEDKtr", 6),
+            ("BONK", "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 5),
+            ("JUP", "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", 6),
+            ("RAY", "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R", 6),
+            ("WIF", "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", 6),
+            ("MSOL", "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", 9),
+            ("JITOSOL", "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", 9),
+        ),
         path="m/44'/501'/0'/0'",
     ),
     ChainSpec(

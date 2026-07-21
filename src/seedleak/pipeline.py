@@ -25,11 +25,13 @@ def assess_finding(
     finding: Finding,
     *,
     check_balance: bool,
+    indexes: list[int] | str | None = None,
 ) -> Assessment:
     return assess_mnemonic(
         finding.normalized,
         language=finding.language if finding.language != "custom" else "english",
         check_balance=check_balance,
+        indexes=indexes,
     )
 
 
@@ -44,6 +46,7 @@ def store_finding(
     notes: str | None = None,
     check_balance: bool = False,
     secret: bytes | None = None,
+    indexes: list[int] | str | None = None,
 ) -> RecordedFinding:
     """Fingerprint, optional multi-chain balance check, store metadata, drop seed."""
     sec = secret or load_or_create_secret()
@@ -54,33 +57,30 @@ def store_finding(
     eth = btc44 = btc84 = None
     addresses_json: str | None = None
 
-    if check_balance:
-        assessment = assess_finding(finding, check_balance=True)
-        fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
-        if assessment.addresses:
-            eth = assessment.addresses.eth or None
-            btc44 = assessment.addresses.btc_legacy or None
-            btc84 = assessment.addresses.btc_segwit or None
-            addresses_json = json.dumps(
-                assessment.addresses.to_dict(), ensure_ascii=False
-            )
-        if assessment.balances:
-            bal_json = json.dumps(assessment.balances.to_dict(), ensure_ascii=False)
-            priority = assessment.priority
-            has_funds = assessment.has_funds
-        elif assessment.priority:
-            priority = assessment.priority
-    else:
-        # Still derive addresses without network I/O for inventory
-        assessment = assess_finding(finding, check_balance=False)
-        fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
-        if assessment.addresses:
-            eth = assessment.addresses.eth or None
-            btc44 = assessment.addresses.btc_legacy or None
-            btc84 = assessment.addresses.btc_segwit or None
-            addresses_json = json.dumps(
-                assessment.addresses.to_dict(), ensure_ascii=False
-            )
+    assessment = assess_finding(
+        finding,
+        check_balance=check_balance,
+        indexes=indexes,
+    )
+    fp = assessment.fingerprint or fp_fn(finding.normalized, sec)
+    if assessment.addresses:
+        eth = assessment.addresses.eth or None
+        btc44 = assessment.addresses.btc_legacy or None
+        btc84 = assessment.addresses.btc_segwit or None
+        addresses_json = json.dumps(
+            {
+                "flat": assessment.addresses.to_dict(),
+                "by_index": assessment.addresses.to_nested_dict(),
+                "indexes": assessment.indexes or assessment.addresses.indexes,
+            },
+            ensure_ascii=False,
+        )
+    if assessment.balances:
+        bal_json = json.dumps(assessment.balances.to_dict(), ensure_ascii=False)
+        priority = assessment.priority
+        has_funds = assessment.has_funds
+    elif assessment.priority:
+        priority = assessment.priority
 
     note_parts = [notes] if notes else []
     if finding.language:
@@ -89,6 +89,8 @@ def store_finding(
         note_parts.append(f"priority={priority}")
     if assessment and assessment.chains_derived:
         note_parts.append(f"chains={assessment.chains_derived}")
+    if assessment and assessment.indexes:
+        note_parts.append(f"idx={','.join(map(str, assessment.indexes))}")
     merged_notes = ";".join(p for p in note_parts if p)
 
     cid, created = store.upsert_finding(
@@ -123,11 +125,16 @@ def format_assessment_line(assessment: Assessment | None) -> str:
     parts = [f"priority={assessment.priority}"]
     if assessment.chains_derived:
         parts.append(f"chains={assessment.chains_derived}")
+    if assessment.indexes:
+        parts.append(f"idx={min(assessment.indexes)}-{max(assessment.indexes)}")
     if assessment.addresses and assessment.addresses.eth:
         parts.append(f"eth={assessment.addresses.eth[:10]}…")
     if assessment.balances:
         parts.append(assessment.balances.summary_line())
         if assessment.has_funds:
             parts.append("HAS_FUNDS")
-            parts.append("funded=" + ",".join(assessment.balances.funded_chains))
+            funded = assessment.balances.funded_chains
+            parts.append("funded=" + ",".join(funded[:6]))
+            if len(funded) > 6:
+                parts.append(f"+{len(funded) - 6}")
     return "  ".join(parts)

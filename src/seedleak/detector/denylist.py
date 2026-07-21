@@ -20,21 +20,15 @@ DEFAULT_DENYLIST: frozenset[str] = frozenset(
         "legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth useful legal winner thank year wave sausage worth title",
         "letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic avoid letter advice cage absurd amount doctor acoustic bless",
         "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo vote",
-        "all hour make first leader extend simple mechanical into captivate soft wear splash with night machine manual pomp regular depend race wilderness spike unveil",
         # Hardhat / ethers sample
         "test test test test test test test test test test test junk",
         # MetaMask / docs frequently used
         "bottom drive obey lake curtain smoke basket hold race lonely fit walk",
-        # iancoleman bip39 online tool examples
-        "witch collapse practice feed shame open despair creek road again ice least",
-        # Another widely copied tutorial seed (empty/low funds demos)
+        # Widely copied tutorial / ganache seeds
         "army van defense carry jealous true garbage claim echo media make crunch",
-        "outside twice turtle salon dramatic april fluid scare distance introduction settle upset",
-        # Ganache / truffle classic
         "candy maple cake sugar pudding cream honey rich smooth crumble sweet treat",
         # OpenZeppelin / various docs
         "myth like bonus scare over problem client lizard pioneer submit female collect",
-        # BIP39 multi-lang zero entropy often translated — english already covered
     }
 )
 

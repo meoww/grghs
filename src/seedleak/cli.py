@@ -50,8 +50,8 @@ def _secret() -> bytes:
     return load_or_create_secret()
 
 
-def _parse_langs(lang: str | None, all_langs: bool) -> list[str]:
-    if all_langs:
+def _parse_langs(lang: str | None, all_langs: bool, *, default_all: bool = False) -> list[str]:
+    if all_langs or (default_all and not lang):
         return default_languages(all_langs=True)
     if not lang:
         return default_languages(all_langs=False)
@@ -68,15 +68,28 @@ def _lang_option(f):
     f = click.option(
         "--lang",
         default=None,
-        help="Comma-separated BIP39 languages (default: english). "
+        help="Comma-separated BIP39 languages (default: english, or all for hunt). "
         f"Known: {', '.join(sorted(LANGUAGES))}",
     )(f)
     f = click.option(
-        "--all-langs",
-        is_flag=True,
-        help="Scan with all bundled BIP39 wordlists (slower)",
+        "--all-langs/--english-only",
+        default=False,
+        show_default=True,
+        help="Scan with all bundled BIP39 wordlists",
     )(f)
     return f
+
+
+def _indexes_option(default: str = "0-5"):
+    def deco(f):
+        return click.option(
+            "--indexes",
+            default=default,
+            show_default=True,
+            help="HD address indexes to derive/check, e.g. 0-5 or 0,1,2",
+        )(f)
+
+    return deco
 
 
 @click.group()
@@ -102,6 +115,7 @@ def main() -> None:
     show_default=True,
     help="Derive addresses + public balance check",
 )
+@click.option("--indexes", default="0-5", show_default=True)
 @_lang_option
 def scan_file_cmd(
     path: Path,
@@ -109,6 +123,7 @@ def scan_file_cmd(
     db: Path | None,
     no_store: bool,
     check_balance: bool,
+    indexes: str,
     lang: str | None,
     all_langs: bool,
 ) -> None:
@@ -139,6 +154,7 @@ def scan_file_cmd(
                 file_path=path.name,
                 check_balance=check_balance,
                 secret=secret,
+                indexes=indexes,
             )
             color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
             console.print(
@@ -445,12 +461,20 @@ def scan_text_cmd(
         if check_balance and f.is_alert:
             from seedleak.liveness.assess import assess_mnemonic
 
-            a = assess_mnemonic(f.normalized, language=f.language, check_balance=True)
+            a = assess_mnemonic(
+                f.normalized,
+                language=f.language,
+                check_balance=True,
+                indexes="0-5",
+            )
             console.print(f"  {format_assessment_line(a)}")
             if a.addresses:
                 console.print(f"  ETH  {a.addresses.eth}")
-                console.print(f"  BTC44 {a.addresses.btc_legacy}")
                 console.print(f"  BTC84 {a.addresses.btc_segwit}")
+                if a.addresses.get("tron"):
+                    console.print(f"  TRON {a.addresses.get('tron')}")
+                if a.addresses.get("sol"):
+                    console.print(f"  SOL  {a.addresses.get('sol')}")
             if a.has_funds:
                 funded += 1
                 console.print("  [bold red]HAS_FUNDS — prioritize disclosure[/bold red]")
@@ -473,11 +497,10 @@ def scan_text_cmd(
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable public metadata")
 @click.option("--no-balance", is_flag=True, help="Skip network balance queries")
 @click.option(
-    "--index",
-    "address_index",
-    default=0,
+    "--indexes",
+    default="0-5",
     show_default=True,
-    help="HD address index",
+    help="HD address indexes, e.g. 0-5 or 0,1,2",
 )
 @click.option(
     "--show-all-addresses",
@@ -490,15 +513,16 @@ def assess_cmd(
     lang: str,
     as_json: bool,
     no_balance: bool,
-    address_index: int,
+    indexes: str,
     show_all_addresses: bool,
 ) -> None:
-    """Validate BIP39 + multi-chain derive + public balances.
+    """Validate BIP39 + multi-chain/multi-index derive + public balances.
 
     Covers BTC/EVM/TRON/SOL/COSMOS/XRP/APT/SUI and more (see `seedleak chains`).
-    Input is never written to the case DB. --json never includes the mnemonic.
+    Default indexes 0–5. Input never written to DB. --json never includes mnemonic.
     """
     from seedleak.liveness.assess import assess_mnemonic
+    from seedleak.liveness.derive import parse_indexes
 
     if use_stdin or mnemonic is None:
         mnemonic = sys.stdin.read().strip()
@@ -506,11 +530,12 @@ def assess_cmd(
         console.print("[red]Empty mnemonic[/red]")
         sys.exit(1)
 
+    idx = parse_indexes(indexes)
     a = assess_mnemonic(
         mnemonic,
         language=None if lang == "auto" else lang,
         check_balance=not no_balance,
-        address_index=address_index,
+        indexes=idx,
     )
     del mnemonic
 
@@ -522,18 +547,21 @@ def assess_cmd(
         console.print(f"words      : {a.word_count}  lang={a.language}")
         console.print(f"fingerprint: {a.fingerprint[:24]}…")
         console.print(f"priority   : {a.priority}")
-        console.print(f"chains     : {a.chains_derived} derived")
+        console.print(
+            f"chains     : {a.chains_derived} × indexes {idx[0]}-{idx[-1]} "
+            f"({len(a.addresses.entries) if a.addresses else 0} addresses)"
+        )
         if a.addresses:
             if show_all_addresses:
                 table = Table(title="Derived addresses (public)")
+                table.add_column("Idx", justify="right")
                 table.add_column("Chain")
                 table.add_column("Path")
                 table.add_column("Address")
                 for e in a.addresses.entries:
-                    table.add_row(e.chain_id, e.path, e.address)
+                    table.add_row(str(e.index), e.chain_id, e.path, e.address)
                 console.print(table)
             else:
-                # Highlight common wallet ecosystems
                 for cid in (
                     "eth",
                     "btc_segwit",
@@ -545,12 +573,11 @@ def assess_cmd(
                     "atom",
                     "xrp",
                 ):
-                    addr = a.addresses.get(cid)
+                    addr = a.addresses.get(cid, 0)
                     if addr:
                         console.print(f"{cid:12}: {addr}")
                 console.print(
-                    f"[dim]+{max(0, a.chains_derived - 9)} more "
-                    f"(use --show-all-addresses or --json)[/dim]"
+                    f"[dim]index 0 highlights; full map: --show-all-addresses / --json[/dim]"
                 )
             if a.addresses.errors:
                 console.print(f"[yellow]derive errors: {len(a.addresses.errors)}[/yellow]")
@@ -559,12 +586,19 @@ def assess_cmd(
             funded = [b for b in a.balances.items if b.ok and b.raw > 0]
             if funded:
                 ft = Table(title="Funded")
+                ft.add_column("Idx", justify="right")
                 ft.add_column("Chain")
                 ft.add_column("Asset")
                 ft.add_column("Amount")
                 ft.add_column("Address")
                 for b in funded:
-                    ft.add_row(b.chain_id, b.symbol, f"{b.amount:g}", b.address[:18] + "…")
+                    ft.add_row(
+                        str(b.index),
+                        b.chain_id,
+                        b.symbol,
+                        f"{b.amount:g}",
+                        b.address[:18] + "…",
+                    )
                 console.print(ft)
             if a.balances.errors:
                 console.print(
@@ -577,8 +611,7 @@ def assess_cmd(
             console.print("[bold red]HAS_FUNDS on one or more derived addresses[/bold red]")
         elif a.actionable:
             console.print(
-                "[green]No funds on checked mainnet addresses "
-                f"(index {address_index})[/green]"
+                f"[green]No funds on checked mainnet addresses (indexes {idx[0]}-{idx[-1]})[/green]"
             )
 
     if not a.valid_checksum:
@@ -870,20 +903,46 @@ def notify_batch_cmd(
     show_default=True,
     help="Derive addresses + public balance check for each alert",
 )
+@click.option(
+    "--indexes",
+    default="0-5",
+    show_default=True,
+    help="HD address indexes for balance severity, e.g. 0-5",
+)
+@click.option(
+    "--all-langs/--english-only",
+    default=True,
+    show_default=True,
+    help="Detect BIP39 in all bundled languages (default on for hunt)",
+)
+@click.option("--lang", default=None, help="Override languages (disables default all-langs if set)")
 @click.option("--db", type=click.Path(path_type=Path), default=None)
-@_lang_option
 def github_search_cmd(
     queries: tuple[str, ...],
     max_per_query: int,
     check_balance: bool,
-    db: Path | None,
-    lang: str | None,
+    indexes: str,
     all_langs: bool,
+    lang: str | None,
+    db: Path | None,
 ) -> None:
-    """Search public GitHub code (requires GITHUB_TOKEN). Rate-limit aware."""
-    from seedleak.collectors.github_search import search_and_scan
+    """Search public GitHub code (requires GITHUB_TOKEN). Rate-limit aware.
 
-    languages = _parse_langs(lang, all_langs)
+    Defaults: all BIP39 languages, HD indexes 0–5, multi-chain balances.
+    """
+    from seedleak.collectors.github_search import search_and_scan
+    from seedleak.liveness.derive import parse_indexes
+
+    # If user passes --lang, use that; else honor --all-langs (default True)
+    if lang:
+        languages = _parse_langs(lang, False)
+    else:
+        languages = _parse_langs(None, all_langs)
+    idx = parse_indexes(indexes)
+    console.print(
+        f"Hunt langs={','.join(languages)} indexes={idx[0]}-{idx[-1]} "
+        f"balance={check_balance}"
+    )
     try:
         hits = search_and_scan(
             list(queries) if queries else None,
@@ -908,6 +967,7 @@ def github_search_cmd(
                 file_path=hit.path,
                 commit_sha=hit.sha,
                 check_balance=check_balance,
+                indexes=idx,
             )
             color = "bold red" if rec.assessment and rec.assessment.has_funds else "red"
             console.print(
@@ -917,8 +977,14 @@ def github_search_cmd(
             if rec.assessment:
                 console.print(f"  {format_assessment_line(rec.assessment)}")
                 if rec.assessment.addresses:
-                    console.print(f"  ETH {rec.assessment.addresses.eth}")
+                    console.print(f"  ETH0 {rec.assessment.addresses.eth}")
                     console.print(f"  BTC84 {rec.assessment.addresses.btc_segwit}")
+                    tron = rec.assessment.addresses.get("tron")
+                    sol = rec.assessment.addresses.get("sol")
+                    if tron:
+                        console.print(f"  TRON {tron}")
+                    if sol:
+                        console.print(f"  SOL  {sol}")
                 if rec.assessment.has_funds:
                     funded += 1
     console.print(

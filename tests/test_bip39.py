@@ -69,7 +69,11 @@ def test_scan_finds_valid_in_noise():
 
 
 def test_denylist_suppresses_alert():
-    m = next(iter(DEFAULT_DENYLIST))
+    m = (
+        "abandon abandon abandon abandon abandon abandon "
+        "abandon abandon abandon abandon abandon about"
+    )
+    assert m in DEFAULT_DENYLIST
     text = f"demo seed: {m}"
     findings = scan_text(text, denylist=load_denylist())
     assert findings

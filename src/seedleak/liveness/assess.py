@@ -11,7 +11,12 @@ from seedleak.detector.bip39 import LANGUAGES, load_wordlist, validate_checksum
 from seedleak.detector.denylist import load_denylist
 from seedleak.liveness.balances import BalanceReport, check_balances
 from seedleak.liveness.chains import list_chain_ids
-from seedleak.liveness.derive import DerivedWallet, derive_addresses
+from seedleak.liveness.derive import (
+    DEFAULT_INDEXES,
+    DerivedWallet,
+    derive_addresses,
+    parse_indexes,
+)
 from seedleak.storage.fingerprint import fingerprint, load_or_create_secret
 
 
@@ -26,6 +31,7 @@ class Assessment:
     balances: BalanceReport | None
     error: str | None = None
     chains_derived: int = 0
+    indexes: list[int] | None = None
 
     @property
     def actionable(self) -> bool:
@@ -44,7 +50,6 @@ class Assessment:
         return "unknown"
 
     def to_public_dict(self) -> dict[str, Any]:
-        """JSON-safe metadata — never includes mnemonic."""
         return {
             "valid_checksum": self.valid_checksum,
             "denylisted": self.denylisted,
@@ -55,8 +60,12 @@ class Assessment:
             "priority": self.priority,
             "has_funds": self.has_funds,
             "chains_derived": self.chains_derived,
+            "indexes": self.indexes or [0],
             "chain_ids": list_chain_ids(),
             "addresses": self.addresses.to_dict() if self.addresses else None,
+            "addresses_by_index": self.addresses.to_nested_dict()
+            if self.addresses
+            else None,
             "address_errors": self.addresses.errors if self.addresses else [],
             "balances": self.balances.to_dict() if self.balances else None,
             "error": self.error,
@@ -67,17 +76,13 @@ class Assessment:
 
 
 def detect_language(words: list[str]) -> str | None:
-    """Return first language whose wordlist contains all words."""
     for lang in LANGUAGES:
         try:
             _, index = load_wordlist(lang)
         except Exception:
             continue
-        if all(w in index for w in words):
-            # Prefer exact checksum match
-            if validate_checksum(words, index):
-                return lang
-    # Fallback: any full membership
+        if all(w in index for w in words) and validate_checksum(words, index):
+            return lang
     for lang in LANGUAGES:
         try:
             _, index = load_wordlist(lang)
@@ -96,9 +101,10 @@ def assess_mnemonic(
     check_usdt: bool = True,
     secret: bytes | None = None,
     chain_ids: list[str] | None = None,
-    address_index: int = 0,
+    address_index: int | None = None,
+    indexes: list[int] | str | None = None,
 ) -> Assessment:
-    """Full multi-chain pipeline. Do not persist the mnemonic after return."""
+    """Full multi-chain / multi-index pipeline. Do not persist the mnemonic."""
     words = mnemonic.strip().lower().split()
     word_count = len(words)
     normalized = " ".join(words)
@@ -138,11 +144,21 @@ def assess_mnemonic(
             balances=None,
         )
 
+    # Resolve indexes: explicit list > single address_index > default 0-5
+    if isinstance(indexes, str):
+        idx_list = parse_indexes(indexes)
+    elif indexes is not None:
+        idx_list = sorted({int(i) for i in indexes})
+    elif address_index is not None:
+        idx_list = [int(address_index)]
+    else:
+        idx_list = list(DEFAULT_INDEXES)
+
     try:
         addrs = derive_addresses(
             normalized,
             chain_ids=chain_ids,
-            index=address_index,
+            indexes=idx_list,
         )
     except Exception as e:
         return Assessment(
@@ -154,12 +170,13 @@ def assess_mnemonic(
             addresses=None,
             balances=None,
             error=f"derive: {e}",
+            indexes=idx_list,
         )
 
     balances = None
     if check_balance:
         try:
-            workers = int(os.environ.get("SEEDLEAK_BALANCE_WORKERS", "12"))
+            workers = int(os.environ.get("SEEDLEAK_BALANCE_WORKERS", "16"))
             balances = check_balances(
                 addrs,
                 check_usdt=check_usdt,
@@ -176,5 +193,6 @@ def assess_mnemonic(
         fingerprint=fp,
         addresses=addrs,
         balances=balances,
-        chains_derived=len(addrs.entries),
+        chains_derived=len({e.chain_id for e in addrs.entries}),
+        indexes=idx_list,
     )
