@@ -1,0 +1,218 @@
+"""SQLite case store — metadata only, never plaintext mnemonics."""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Iterator
+
+
+class CaseStatus(str, Enum):
+    NEW = "new"
+    REVIEWED = "reviewed"
+    NOTIFIED = "notified"
+    FIXED = "fixed"
+    IGNORED = "ignored"
+    FALSE_POSITIVE = "false_positive"
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS cases (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    fingerprint     TEXT NOT NULL,
+    source_type     TEXT NOT NULL,          -- file | repo | github
+    source_path     TEXT NOT NULL,          -- path or repo URL
+    file_path       TEXT,                   -- path inside repo if any
+    commit_sha      TEXT,
+    word_count      INTEGER NOT NULL,
+    context_preview TEXT,
+    status          TEXT NOT NULL DEFAULT 'new',
+    found_at        TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    notify_attempts INTEGER NOT NULL DEFAULT 0,
+    last_notified_at TEXT,
+    notes           TEXT,
+    UNIQUE(fingerprint, source_path, file_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+CREATE INDEX IF NOT EXISTS idx_cases_fp ON cases(fingerprint);
+"""
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass
+class Case:
+    id: int
+    fingerprint: str
+    source_type: str
+    source_path: str
+    file_path: str | None
+    commit_sha: str | None
+    word_count: int
+    context_preview: str | None
+    status: str
+    found_at: str
+    updated_at: str
+    notify_attempts: int
+    last_notified_at: str | None
+    notes: str | None
+
+
+class CaseStore:
+    def __init__(self, db_path: Path | str):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        return conn
+
+    def _init_db(self) -> None:
+        with self._connect() as conn:
+            conn.executescript(SCHEMA)
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def upsert_finding(
+        self,
+        *,
+        fingerprint: str,
+        source_type: str,
+        source_path: str,
+        file_path: str | None,
+        word_count: int,
+        context_preview: str | None,
+        commit_sha: str | None = None,
+        notes: str | None = None,
+    ) -> tuple[int, bool]:
+        """Insert or ignore duplicate. Returns (case_id, created)."""
+        now = _utcnow()
+        with self.connection() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO cases (
+                    fingerprint, source_type, source_path, file_path,
+                    commit_sha, word_count, context_preview, status,
+                    found_at, updated_at, notes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(fingerprint, source_path, file_path) DO NOTHING
+                """,
+                (
+                    fingerprint,
+                    source_type,
+                    source_path,
+                    file_path,
+                    commit_sha,
+                    word_count,
+                    context_preview,
+                    CaseStatus.NEW.value,
+                    now,
+                    now,
+                    notes,
+                ),
+            )
+            if cur.rowcount == 1:
+                return int(cur.lastrowid), True
+
+            row = conn.execute(
+                """
+                SELECT id FROM cases
+                WHERE fingerprint = ? AND source_path = ?
+                  AND (file_path IS ? OR file_path = ?)
+                """,
+                (fingerprint, source_path, file_path, file_path),
+            ).fetchone()
+            return int(row["id"]), False
+
+    def list_cases(
+        self,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[Case]:
+        with self.connection() as conn:
+            if status:
+                rows = conn.execute(
+                    "SELECT * FROM cases WHERE status = ? ORDER BY id DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM cases ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [self._row_to_case(r) for r in rows]
+
+    def get(self, case_id: int) -> Case | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM cases WHERE id = ?", (case_id,)
+            ).fetchone()
+        return self._row_to_case(row) if row else None
+
+    def set_status(self, case_id: int, status: CaseStatus | str, notes: str | None = None) -> None:
+        st = status.value if isinstance(status, CaseStatus) else status
+        now = _utcnow()
+        with self.connection() as conn:
+            if notes is not None:
+                conn.execute(
+                    "UPDATE cases SET status = ?, updated_at = ?, notes = ? WHERE id = ?",
+                    (st, now, notes, case_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE cases SET status = ?, updated_at = ? WHERE id = ?",
+                    (st, now, case_id),
+                )
+
+    def mark_notified(self, case_id: int) -> None:
+        now = _utcnow()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                UPDATE cases
+                SET status = ?, updated_at = ?, last_notified_at = ?,
+                    notify_attempts = notify_attempts + 1
+                WHERE id = ?
+                """,
+                (CaseStatus.NOTIFIED.value, now, now, case_id),
+            )
+
+    @staticmethod
+    def _row_to_case(row: sqlite3.Row) -> Case:
+        return Case(
+            id=row["id"],
+            fingerprint=row["fingerprint"],
+            source_type=row["source_type"],
+            source_path=row["source_path"],
+            file_path=row["file_path"],
+            commit_sha=row["commit_sha"],
+            word_count=row["word_count"],
+            context_preview=row["context_preview"],
+            status=row["status"],
+            found_at=row["found_at"],
+            updated_at=row["updated_at"],
+            notify_attempts=row["notify_attempts"],
+            last_notified_at=row["last_notified_at"],
+            notes=row["notes"],
+        )
