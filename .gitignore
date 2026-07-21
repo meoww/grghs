@@ -22,3 +22,5 @@ tests/fixtures/
 hmac_secret
 vault.key
 *vault*.json
+
+.tmp-hunt/
